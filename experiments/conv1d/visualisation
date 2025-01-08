@@ -1,0 +1,254 @@
+
+# <editor-fold desc="Explainability conv1d Visualisation">
+
+verbose = False
+model_parameters = expand_grid({
+
+    'fold': list(range(5)),
+    'training_method': ["forward_projection"],
+    'activation': ['relu', ],
+})
+
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+dataset_i = "ptbxl_mi"
+X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i)
+
+model_parameters_i = 0
+training_method = model_parameters.training_method[model_parameters_i]
+fold = model_parameters.fold[model_parameters_i]
+activation = model_parameters.activation[model_parameters_i]
+hidden_dim = 32
+n_blocks = 4
+kernel_size = 3
+
+# train 1d conv
+train_folds = folds != fold
+val_folds = torch.logical_not(train_folds)
+X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+w_list, q_list, u_list, training_time = train_forward_conv1d(x=X_train,
+                                                             y=Y_train,
+                                                             training_method=training_method,
+                                                             hidden_dim=hidden_dim,
+                                                             activation=activation,
+                                                             n_blocks=n_blocks,
+                                                             device=device,
+                                                             batch_size=1000,
+                                                             return_qu=True,
+                                                             )
+
+selected_idx = [30, 615, 70, 0]
+x = X_test[selected_idx].to(device)
+activation_fn = activation_dict[activation]
+ecg_underlay = x.to("cpu").numpy()
+yhats = []
+timesteps = []
+timestep = torch.arange(x.shape[1])[None, :, None]
+input_dependent = False
+for l in range(len(w_list) - 1):
+    # convolution and pooling
+    stride = 2 - ((l + 1) % 2)
+    if (l % 1) == 0:
+        x = torch.nn.functional.pad(x, pad=(0, 0, 2, 0, 0, 0))
+    x = x.unfold(dimension=1, size=kernel_size, step=stride).flatten(start_dim=2)
+    x = concatenate_ones(x)
+
+    z = x @ w_list[l]
+    if input_dependent:
+        g_a_q = torch.sign(x @ q_list[l])
+        yhat = torch.tanh(z - g_a_q) @ torch.linalg.pinv(u_list[l])
+    else:
+        yhat = z @ torch.linalg.pinv(u_list[l])
+
+    yhats.append(yhat)
+    x = activation_fn(z)
+
+for l in range(len(yhats) - 1):
+    yhat_l = yhats[l]
+    expansion = ecg_underlay.shape[1] // yhat_l.shape[1]
+    yhat_l = yhat_l.permute(dims=(0, 2, 1))
+    yhat_l = torch.nn.Upsample(scale_factor=(expansion,), mode="linear")(yhat_l)
+    yhat_l = yhat_l.permute(dims=(0, 2, 1))
+    yhats[l] = yhat_l.to("cpu").numpy()
+
+plt.close()
+fig, axs = plt.subplots(4, 4)
+
+y_lim_input = [-6, 6.3]
+y_lim2 = [-0.1, 1.5]
+y_lim4 = [-0.1, 1.5]
+y_lim6 = [-0.1, 1.1]
+interval_colour = "red"
+fp_colour = "#7570B3"
+
+example_idx = 0
+start_time = 360
+end_time = start_time + 250
+intervals = ((40, 70), (175, 210))
+for interval_i in intervals:
+    axs[0, example_idx].axes.axvspan(interval_i[0], interval_i[1], alpha=0.1, color=interval_colour)
+for interval_i in intervals:
+    for j in range(1, 4):
+        axs[j, example_idx].axes.axvspan(interval_i[0] / 100, interval_i[1] / 100, alpha=0.1, color=interval_colour)
+
+axs[0, example_idx].plot(np.arange(end_time - start_time),
+                         ecg_underlay[example_idx, start_time:end_time, 11], color="black")
+axs[0, example_idx].axes.get_xaxis().set_visible(False)
+axs[0, example_idx].set_ylim(y_lim_input)
+axs[0, example_idx].axes.set_ylabel("Input\n(mV)", rotation=0, labelpad=10)
+axs[0, example_idx].axes.set_title("Patient A\nLead v6")
+
+axs[1, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[2][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[1, example_idx].axes.set_xlabel("Time (s)")
+axs[1, example_idx].axes.set_ylabel('$\hat{y}_2$', fontsize=14, rotation=0, labelpad=10)
+axs[1, example_idx].set_ylim(y_lim2)
+axs[1, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[2, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[4][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[2, example_idx].axes.set_xlabel("Time (s)")
+axs[2, example_idx].axes.set_ylabel('$\hat{y}_4$', fontsize=14, rotation=0, labelpad=10)
+axs[2, example_idx].set_ylim(y_lim4)
+axs[2, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[3, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[6][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[3, example_idx].axes.set_xlabel("Time (s)")
+axs[3, example_idx].axes.set_ylabel('$\hat{y}_6$', fontsize=14, rotation=0, labelpad=10)
+axs[3, example_idx].set_ylim(y_lim6)
+axs[3, example_idx].xaxis.set_ticks(np.arange(3))
+
+example_idx = 1
+start_time = 640
+end_time = start_time + 250
+
+axs[0, example_idx].cla()
+
+intervals = ((55, 75), (135, 157), (218, 238))
+for interval_i in intervals:
+    axs[0, example_idx].axes.axvspan(interval_i[0], interval_i[1], alpha=0.1, color=interval_colour)
+for interval_i in intervals:
+    for j in range(1, 4):
+        axs[j, example_idx].axes.axvspan(interval_i[0] / 100, interval_i[1] / 100, alpha=0.1, color=interval_colour)
+
+axs[0, example_idx].plot(np.arange(end_time - start_time),
+                         ecg_underlay[example_idx, start_time:end_time, 7], color="black")
+axs[0, example_idx].set_ylim(y_lim_input)
+
+axs[0, example_idx].axes.set_title("Patient B\nLead v1")
+
+axs[1, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[2][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[1, example_idx].set_ylim(y_lim2)
+axs[1, example_idx].axes.set_xlabel("Time (s)")
+axs[1, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[2, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[4][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[2, example_idx].set_ylim(y_lim4)
+axs[2, example_idx].axes.set_xlabel("Time (s)")
+axs[2, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[3, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[6][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[3, example_idx].axes.set_xlabel("Time (s)")
+axs[3, example_idx].set_ylim(y_lim6)
+axs[3, example_idx].xaxis.set_ticks(np.arange(3))
+
+example_idx = 2
+start_time = 120
+end_time = start_time + 250
+
+intervals = ((25, 55), (107, 137), (198, 225))
+for interval_i in intervals:
+    axs[0, example_idx].axes.axvspan(interval_i[0], interval_i[1], alpha=0.1, color=interval_colour)
+for interval_i in intervals:
+    for j in range(1, 4):
+        axs[j, example_idx].axes.axvspan(interval_i[0] / 100, interval_i[1] / 100, alpha=0.1, color=interval_colour)
+
+axs[0, example_idx].plot(np.arange(end_time - start_time),
+                         ecg_underlay[example_idx, start_time:end_time, 0], color="black")
+axs[0, example_idx].set_ylim(y_lim_input)
+axs[0, example_idx].axes.set_title("Patient C\nLead I")
+
+axs[1, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[2][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[1, example_idx].axes.set_xlabel("Time (s)")
+axs[1, example_idx].set_ylim(y_lim2)
+axs[1, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[2, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[4][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[2, example_idx].axes.set_xlabel("Time (s)")
+axs[2, example_idx].set_ylim(y_lim4)
+axs[2, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[3, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[6][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[3, example_idx].axes.set_xlabel("Time (s)")
+axs[3, example_idx].set_ylim(y_lim6)
+axs[3, example_idx].xaxis.set_ticks(np.arange(3))
+
+example_idx = 3
+start_time = 160
+end_time = start_time + 250
+axs[0, example_idx].plot(np.arange(end_time - start_time),
+                         ecg_underlay[example_idx, start_time:end_time, 6], color="black")
+axs[0, example_idx].set_ylim(y_lim_input)
+axs[0, example_idx].axes.set_title("Patient D\nLead v1")
+
+axs[1, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[2][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[1, example_idx].axes.set_xlabel("Time (s)")
+axs[1, example_idx].set_ylim(y_lim2)
+axs[1, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[2, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[4][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[2, example_idx].axes.set_xlabel("Time (s)")
+axs[2, example_idx].set_ylim(y_lim4)
+axs[2, example_idx].xaxis.set_ticks(np.arange(3))
+
+axs[3, example_idx].plot(np.arange(end_time - start_time) / 100,
+                         yhats[6][example_idx, start_time:end_time, 1],
+                         color=fp_colour)
+axs[3, example_idx].axes.set_xlabel("Time (s)")
+axs[3, example_idx].set_ylim(y_lim6)
+axs[3, example_idx].xaxis.set_ticks(np.arange(3))
+
+for i in range(3):
+    for j in range(4):
+        axs[i, j].axes.get_xaxis().set_visible(False)
+
+for i in range(4):
+    for j in range(1, 4):
+        axs[i, j].axes.get_yaxis().set_visible(False)
+
+plt.tight_layout()
+
+if False:
+    plt.savefig(fname=os.path.join("images", "model_explanation_08_01_25.pdf"),
+                dpi=1200
+                )
+
+# </editor-fold>
