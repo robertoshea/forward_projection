@@ -1,0 +1,138 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+
+# <editor-fold desc="Forward mlp experiments">
+
+model_parameters = expand_grid({
+    'fold': list(range(5)),
+    'training_method': ["forward_projection", "random", "label_projection", "noisy_label_projection"],
+    'activation': forward_activations,
+})
+
+tabular_datasets = ["FashionMNIST"]
+verbose = False
+
+#set seed
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+forward_mlp_experiments = []
+for dataset_i in tabular_datasets:
+
+    print(dataset_i)
+    X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i)
+
+    for model_parameters_i in range(len(model_parameters)):
+        print(model_parameters_i)
+
+        training_method = model_parameters.training_method[model_parameters_i]
+        activation = model_parameters.activation[model_parameters_i]
+        fold = model_parameters.fold[model_parameters_i]
+
+        if False:
+            training_method="forward_projection"
+            activation="relu"
+            fold=0
+            verbose=True
+
+        train_folds = folds != fold
+        val_folds = torch.logical_not(train_folds)
+        X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+        Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+        w_list, _, _, training_time = train_forward_mlp(x=X_train,
+                                                        y=Y_train,
+                                                        training_method=training_method,
+                                                        activation=activation
+                                                        )
+        train_metrics = evaluate_forward_mlp(x=X_train,
+                                             y=Y_train,
+                                             w_list=w_list,
+                                             activation=activation,
+                                             )
+
+        val_metrics = evaluate_forward_mlp(x=X_val,
+                                           y=Y_val,
+                                           w_list=w_list,
+                                           activation=activation,
+                                           )
+
+        test_metrics = evaluate_forward_mlp(x=X_test,
+                                            y=Y_test,
+                                            w_list=w_list,
+                                            activation=activation,
+                                            )
+        if verbose:
+            print(training_method)
+            print(activation)
+            print(train_metrics)
+            print(val_metrics)
+            print(test_metrics)
+
+        out = {
+            'dataset': dataset_i,
+            'training_method': training_method,
+            'fold': fold,
+            'activation': activation,
+            'train_auc': train_metrics[0].item(),
+            'train_acc': train_metrics[1].item(),
+            'train_prec': train_metrics[2].item(),
+            'train_recall': train_metrics[3].item(),
+            'train_f1': train_metrics[4].item(),
+            'val_auc': val_metrics[0].item(),
+            'val_acc': val_metrics[1].item(),
+            'val_prec': val_metrics[2].item(),
+            'val_recall': val_metrics[3].item(),
+            'val_f1': val_metrics[4].item(),
+            'test_auc': test_metrics[0].item(),
+            'test_acc': test_metrics[1].item(),
+            'test_prec': test_metrics[2].item(),
+            'test_recall': test_metrics[3].item(),
+            'test_f1': test_metrics[4].item(),
+            'training_time': training_time,
+            "training_epochs": 1,
+        }
+        forward_mlp_experiments.append(out)
+
+forward_mlp_experiments = pd.DataFrame(forward_mlp_experiments)
+output_file = os.path.join(output_dir, "forward_mlp_experiments.csv")
+forward_mlp_experiments.to_csv(path_or_buf=output_file)
+
+
+# </editor-fold>
