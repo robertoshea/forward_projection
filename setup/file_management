@@ -1,0 +1,267 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+
+# <editor-fold desc="File Management">
+date_today = date.today().strftime("%d_%m_%y")
+if not os.path.exists("tables"):
+    os.mkdir('tables')
+
+#date_today = "06_01_25"
+output_dir = "tables_" + date_today
+if not os.path.exists(output_dir):
+    os.mkdir(output_dir)
+
+
+def extract_xy(df_i, resize_transform, diagnosis_labels, mode=torchvision.io.ImageReadMode.GRAY):
+    x = []
+
+    for file_i in df_i.img_file:
+        x_i = torchvision.io.read_image(file_i, mode=mode)
+        x_i = resize_transform(x_i).type(torch.float)
+        x.append(x_i)
+    x = torch.stack(x)
+    x = x / 255.
+    x = x.permute((0, 2, 3, 1))
+
+    y = torch.tensor(pd.get_dummies(df_i.diagnosis, columns=diagnosis_labels).to_numpy(),
+                     dtype=torch.float)
+
+    return x, y
+
+
+def load_dataset(dataset_i,
+                 channels_last=True,
+                 toy_dataset=False,
+                 img_size=128,
+                 data_dir=r"C:\Users\k1930297\OneDrive - King's College London\Documents\Datasets",
+                 ):
+    resize_transform = torchvision.transforms.Resize(size=(img_size, img_size))
+
+    if dataset_i == "FashionMNIST":
+        training_data = datasets.FashionMNIST(
+            root="data",
+            train=True,
+            download=True,
+            transform=ToTensor(),
+        )
+
+        test_data = datasets.FashionMNIST(
+            root="data",
+            train=False,
+            download=True,
+            transform=ToTensor(),
+        )
+
+        # load train data
+        X_train = []
+        y_train = []
+        for i in range(len(training_data)):
+            x_i, y_i = training_data.__getitem__(i)
+            X_train.append(x_i)
+            y_train.append(y_i)
+        X_train = torch.stack(X_train)
+        Y_train = torch.eye(10)[y_train].type(torch.float32)
+        X_train = torch.flatten(X_train, start_dim=1)
+
+        # load test data
+        X_test = []
+        y_test = []
+        for i in range(len(test_data)):
+            x_i, y_i = test_data.__getitem__(i)
+            X_test.append(x_i)
+            y_test.append(y_i)
+        X_test = torch.stack(X_test)
+        X_test = torch.flatten(X_test, start_dim=1)
+        Y_test = torch.eye(10)[y_test].type(torch.float32)
+
+    if dataset_i == 'human_nontata_promoters':
+        dset_train = get_dataset(dataset_i, split='train', version=0)
+        dset_test = get_dataset(dataset_i, split='test', version=0)
+
+        X_train, Y_train = zip(*dset_train)
+        X_train = [dna_to_onehot(i) for i in X_train]
+        X_train = torch.stack(X_train)
+        X_train = X_train.type(torch.float)
+        Y_train = torch.tensor(Y_train)[:, None].type(torch.float)
+
+        X_test, Y_test = zip(*dset_test)
+        X_test = [dna_to_onehot(i) for i in X_test]
+        X_test = torch.stack(X_test)
+        X_test = X_test.type(torch.float)
+        Y_test = torch.tensor(Y_test)[:, None].type(torch.float)
+
+        mu_train = X_train.mean(dim=0, keepdims=True)
+        sd_train = X_train.std(dim=0, keepdims=True) + 0.001
+        X_train = (X_train - mu_train) / sd_train
+        X_test = (X_test - mu_train) / sd_train
+
+    if dataset_i == 'ptbxl_mi':
+
+        # file management
+        ptbxl_dir = "C:\\Users\\k1930297\\Documents\\Datasets\\PTB XL\\PTB XL"
+        ptbxl_npy_dir = os.path.join(ptbxl_dir, 'npy/')
+        os.path.exists(ptbxl_npy_dir)
+
+        ptbxl_key_file = os.path.join(ptbxl_dir, 'scp_statements.csv')
+        ptbxl_keys = pd.read_csv(ptbxl_key_file)
+        ptbxl_keys.rename(columns={ptbxl_keys.columns[0]: "code"}, inplace=True)
+        all_dx_classes = ptbxl_keys.diagnostic_class.unique()[:-1].tolist()
+        dx_label_names = {i: set(ptbxl_keys.code.loc[ptbxl_keys.diagnostic_class == i].to_list()) for i in
+                          all_dx_classes}
+        selected_dx_codes = ['STTC', 'NORM', 'MI', 'HYP', 'CD']
+
+        # create binary vectors for each outcome class
+        ptbxl_label_file = os.path.join(ptbxl_dir, 'ptbxl_database.csv')
+        ptbxl_labels = pd.read_csv(ptbxl_label_file)
+        ptbxl_labels['npy_file'] = [os.path.join(ptbxl_npy_dir, os.path.basename(i)) + '.npy' for i in
+                                    ptbxl_labels.filename_lr]
+        all_scp_code_dicts = [json.loads(i.replace("\'", "\"")) for i in ptbxl_labels.scp_codes]
+        all_scp_code_dicts = [{x: y for x, y in dic_i.items() if y == 100} for dic_i in all_scp_code_dicts]
+        all_scp_codes = [list(i.keys()) for i in all_scp_code_dicts]
+        unique_scp_codes = set(i for scp_code_i in all_scp_codes for i in scp_code_i)
+
+        for subcode_i in unique_scp_codes:
+            ptbxl_labels[subcode_i] = [subcode_i in j for j in all_scp_code_dicts]
+        for code_i in selected_dx_codes:
+            ptbxl_labels[code_i] = ptbxl_labels[list(dx_label_names[code_i])].any(axis=1)
+
+        outcome_i = "MI"
+        confirmed_patients = ptbxl_labels[['NORM', outcome_i]].any(axis=1)
+
+        ptbxl_labels = ptbxl_labels.loc[confirmed_patients, :].reset_index()
+        train_df = ptbxl_labels.loc[ptbxl_labels.strat_fold <= 9].reset_index()
+        test_df = ptbxl_labels.loc[ptbxl_labels.strat_fold == 10].reset_index()
+
+        if toy_dataset:
+            train_df = train_df[:100]
+            test_df = test_df[:100]
+
+        X_train = torch.tensor(np.stack([np.load(i) for i in train_df.npy_file])).type(torch.float)
+        X_test = torch.tensor(np.stack([np.load(i) for i in test_df.npy_file])).type(torch.float)
+        Y_train = torch.tensor(train_df[outcome_i].to_numpy())[:, None].type(torch.float)
+        Y_test = torch.tensor(test_df[outcome_i].to_numpy())[:, None].type(torch.float)
+
+        mu_train = X_train.mean(dim=(0, 1), keepdims=True)
+        sd_train = X_train.std(dim=(0, 1), keepdims=True) + 0.001
+        X_train = (X_train - mu_train) / sd_train
+        X_test = (X_test - mu_train) / sd_train
+
+    if dataset_i == "oct":  # https://data.mendeley.com/datasets/rscbjbr9sj/3
+
+        all_files = rec_listdir(os.path.join(data_dir, "OCT"))
+        all_files = [i for i in all_files if os.path.basename(i) != ".DS_Store"]
+        all_files_basenames = [os.path.basename(i) for i in all_files]
+        img_metadata = pd.DataFrame({
+            "img_file": all_files,
+            "patient_id": [i.split("-")[1] for i in all_files_basenames],
+            "diagnosis": [i.split("-")[0] for i in all_files_basenames],
+            "repeat": [i.split("-")[2][:-5] for i in all_files_basenames],
+            "train_idx": ["train" in i for i in all_files]
+        })
+        img_metadata = img_metadata.loc[~img_metadata.patient_id.duplicated()].reset_index(drop=True)
+        img_metadata = img_metadata.loc[img_metadata.diagnosis.isin(["NORMAL", "CNV"])].reset_index(drop=True)
+        diagnosis_labels = ["NORMAL", "CNV"]
+        img_metadata.diagnosis = pd.Categorical(img_metadata.diagnosis, categories=diagnosis_labels)
+
+        train_df = img_metadata.loc[img_metadata.train_idx].reset_index(drop=True)
+        test_df = img_metadata.loc[~img_metadata.train_idx].reset_index(drop=True)
+
+        X_train, Y_train = extract_xy(train_df,
+                                      resize_transform=resize_transform,
+                                      diagnosis_labels=diagnosis_labels)
+        X_test, Y_test = extract_xy(test_df,
+                                    resize_transform=resize_transform,
+                                    diagnosis_labels=diagnosis_labels)
+
+    if dataset_i == "cxr":  # https://data.mendeley.com/datasets/rscbjbr9sj/3
+
+        all_files = rec_listdir(os.path.join(data_dir, "cxr_pneumonia"))
+        all_files = [i for i in all_files if os.path.basename(i) != ".DS_Store"]
+        all_files_basenames = [os.path.basename(i) for i in all_files]
+        img_metadata = pd.DataFrame({
+            "img_file": all_files,
+            "patient_id": [i.split("-")[1] for i in all_files_basenames],
+            "diagnosis": [i.split("-")[0] for i in all_files_basenames],
+            "repeat": [i.split("-")[2][:-5] for i in all_files_basenames],
+            "train_idx": ["train" in i for i in all_files]
+        })
+        # img_metadata = img_metadata.loc[img_metadata.diagnosis!="VIRUS"].reset_index(drop=True)
+        # img_metadata.loc[img_metadata.diagnosis.isin(["BACTERIA", "VIRUS"]), "diagnosis"] = "PNEUMONIA"
+        # img_metadata.loc[img_metadata.diagnosis.isin(["BACTERIA", "VIRUS"]), "diagnosis"] = "PNEUMONIA"
+        # diagnosis_labels = ['NORMAL', 'PNEUMONIA']
+        diagnosis_labels = ['NORMAL', 'BACTERIA', 'VIRUS']
+        img_metadata.diagnosis = pd.Categorical(img_metadata.diagnosis, categories=diagnosis_labels)
+
+        train_df = img_metadata.loc[img_metadata.train_idx].reset_index(drop=True)
+        test_df = img_metadata.loc[~img_metadata.train_idx].reset_index(drop=True)
+
+        X_train, Y_train = extract_xy(train_df,
+                                      resize_transform=resize_transform,
+                                      diagnosis_labels=diagnosis_labels)
+        X_test, Y_test = extract_xy(test_df,
+                                    resize_transform=resize_transform,
+                                    diagnosis_labels=diagnosis_labels)
+
+    folds = torch.randint(0, 5, size=(len(X_train),))
+
+    if Y_train.shape[-1] == 1:
+        Y_train = torch.concatenate([1 - Y_train, Y_train], dim=-1)
+        Y_test = torch.concatenate([1 - Y_test, Y_test], dim=-1)
+
+    if not channels_last:
+        permute_dims = (0, -1) + tuple(range(1, X_train.ndim - 1))
+        X_train = torch.permute(X_train, dims=permute_dims)
+        X_test = torch.permute(X_test, dims=permute_dims)
+
+    return X_train, Y_train, X_test, Y_test, folds
+
+
+def subsample_dataset(x, y, n_sample):
+    idx = []
+    for i in range(y.shape[1]):
+        idx_i = torch.where(y[:, i] == 1)[0]
+        idx_i = idx_i[torch.randperm(len(idx_i))[:n_sample]]
+        idx.append(idx_i)
+    idx = torch.concatenate(idx)
+    x = x[idx]
+    y = y[idx]
+
+    return x, y
+
+
+# </editor-fold>
