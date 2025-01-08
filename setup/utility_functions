@@ -1,0 +1,99 @@
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+def identity_func(x):
+    return x
+
+
+def rec_listdir(dir):
+    paths = []
+    for root, directories, filenames in os.walk(dir):
+        for filename in filenames:
+            paths.append(os.path.join(root, filename))
+    return paths
+
+
+def compute_metrics(yhat, y):
+    y = torch.squeeze(y).to('cpu')
+    yhat = torch.squeeze(yhat).to('cpu')
+    num_classes = y.shape[1]
+    y = torch.argmax(y, dim=1)
+    yhat_argmax = torch.argmax(yhat, dim=1)
+    auc = torchmetrics.AUROC(task="multiclass", num_classes=num_classes, average="macro")(yhat, y)
+    acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes, average="macro")(yhat_argmax, y)
+    recall = torchmetrics.Recall(task="multiclass", num_classes=num_classes, average="macro")(yhat_argmax, y)
+    prec = torchmetrics.Precision(task="multiclass", num_classes=num_classes, average="macro")(yhat_argmax, y)
+    f1 = torchmetrics.F1Score(task="multiclass", num_classes=num_classes, average="macro")(yhat_argmax, y)
+
+    out = torch.stack([auc, acc, recall, prec, f1])
+
+    return out
+
+
+def expand_grid(dictionary):
+    return pd.DataFrame([row for row in product(*dictionary.values())],
+                        columns=dictionary.keys())
+
+
+def standardise_fn(x, dim=0):
+    x_ = torch.clone(x.detach())
+    mu = x_.mean(dim=dim, keepdims=True)
+    x_ -= mu
+    s = x_.std(dim=dim, keepdims=True) + 1 / len(x_)
+    x_ /= s
+    return x_
+
+
+def mean_sd_func(x):
+    mu = x.mean()
+    sd = x.std()
+    out = f"{mu:.2f} \u00B1 {sd:.3f}"
+    return out
+
+
+def mean_sd_func2(x):
+    mu = (x * 100).mean()
+    sd = (x * 100).std()
+    out = f"{mu:.1f} \u00B1 {sd:.1f}"
+    return out
+
+
+ACGT_mapping = dict(zip("ACGTN", range(5)))
+ACGT_eye = torch.eye(5, dtype=torch.bool)[:, :4]
+
+
+def dna_to_onehot(x):
+    x_ = [ACGT_mapping[i] for i in x]
+    x_ = ACGT_eye[x_]
+    return x_
+
+
+
