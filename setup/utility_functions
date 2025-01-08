@@ -32,6 +32,11 @@ from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
 def identity_func(x):
     return x
 
+def concatenate_ones(x):
+    ones_vec = torch.ones_like(x[..., -1, None,])
+    x = torch.concatenate([x, ones_vec], dim=-1)
+    return x
+
 
 def rec_listdir(dir):
     paths = []
