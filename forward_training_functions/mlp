@@ -1,0 +1,234 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+# </editor-fold>
+
+
+# <editor-fold desc="Forward mlp training and evaluation functions">
+
+'''Ridge regression function to fit weights'''
+def ridge_regression_w(x, y, reg_factor=10, flatten=True, device=device):
+    if flatten:
+        x = x.reshape((-1, x.shape[-1]))
+        y = y.reshape((-1, y.shape[-1]))
+
+    gram_mat = (x.T @ x)
+    gram_mat += torch.eye(gram_mat.shape[0], device=device) * reg_factor
+    try:
+        gram_inv = torch.inverse(gram_mat)
+    except:
+        gram_inv = torch.eye(gram_mat.shape[0], device=device)
+    w_hat = gram_inv @ (x.T @ y)
+
+    if flatten:
+        w_hat = torch.unsqueeze(w_hat, dim=0)
+    return w_hat
+
+
+'''
+function to fit MLP weight matrix for each layer
+'''
+
+
+def fit_w(x, y, hidden_dim=16,
+          flatten=True,
+          reg_factor=10.,
+          activation="relu",
+          return_qu=False,
+          device=device,
+          training_method="forward_projection",
+          ):
+    with torch.no_grad():
+
+        if flatten:
+            y = y.repeat(repeats=(1, x.shape[1], 1))
+            x = x.reshape((-1, x.shape[-1]))
+            y = y.reshape((-1, y.shape[-1]))
+
+        q = torch.randn((x.shape[1], hidden_dim), device=device)  # data projection matrix
+        u = torch.randn((y.shape[1], hidden_dim), device=device)  # label projection matrix
+        y_proj = torch.sign(y @ u)
+        match training_method:
+            case "forward_projection":
+                x_proj = torch.sign(x @ q)
+            case "label_projection":
+                x_proj = torch.zeros_like(y_proj, device=device)
+            case "noisy_label_projection":
+                x_proj = torch.sign(torch.randn_like(y_proj, device=device))
+
+        # optional linear transposition
+        z = x_proj + y_proj
+        z += activation_shift_dict[activation]
+        z *= activation_rescale_dict[activation]
+
+        w = ridge_regression_w(x, z,
+                               reg_factor=reg_factor,
+                               flatten=False,
+                               device=device)
+
+        if flatten:
+            w = torch.unsqueeze(w, dim=0)
+
+        if return_qu:
+            return w, q, u
+        else:
+            return w, None, None
+
+
+'''add column of ones to represent intercept'''
+
+
+def concatenate_ones(x):
+    ones_vec = torch.ones_like(x[..., -1, None,])
+    x = torch.concatenate([x, ones_vec], dim=-1)
+    return x
+
+
+''' train MLP and return weights and projection matrices'''
+
+
+def train_forward_mlp(x,
+                      y,
+                      training_method,
+                      activation,
+                      hidden_dims=[1000] * 3,
+                      reg_factor=10.,
+                      return_qu=False,  # returns projection matrices
+                      verbose=False,
+                      device=device,):
+    start_time = time.perf_counter()
+    activation_fn = activation_dict[activation]
+
+    w_list = []
+    q_list = []
+    u_list = []
+
+    x = x.to(device)
+    y = y.to(device)
+
+    # fit hidden layers
+    for l in range(len(hidden_dims)):
+
+        if verbose:
+            print('fitting layer', l)
+
+        # fitting hidden weights
+        x = concatenate_ones(x)
+        if training_method == "random":
+            w = torch.randn((x.shape[-1], hidden_dims[l]), device=device)
+            w /= w.norm(dim=-1, keepdim=True)
+        if training_method in ["forward_projection", "label_projection", "noisy_label_projection"]:
+            w, q, u = fit_w(x, y,
+                            hidden_dim=hidden_dims[l],
+                            flatten=False,
+                            reg_factor=reg_factor,
+                            return_qu=return_qu,
+                            device=device,
+                            activation=activation,
+                            training_method=training_method,
+                            )
+            q_list.append(q)
+            u_list.append(u)
+        w_list.append(w)
+
+        # forward
+        x = activation_fn(x @ w)
+
+    # fitting output layer
+    if verbose:
+        print('fitting output layer')
+    x = concatenate_ones(x)
+    w = ridge_regression_w(x, 2 * y - 1, flatten=False, reg_factor=1)
+    w_list.append(w)
+
+    end_time = time.perf_counter()
+    training_time = end_time - start_time
+
+    return w_list, q_list, u_list, training_time
+
+
+def evaluate_forward_mlp(x,
+                         y,
+                         w_list,
+                         activation,
+                         ):
+    activation_fn = activation_dict[activation]
+
+    x = x.to(device)
+    y = y.to(device)
+    for l in range(len(w_list) - 1):
+        x = concatenate_ones(x)
+        x = activation_fn(x @ w_list[l])
+
+    x = concatenate_ones(x)
+    yhat = x @ w_list[-1]
+
+    test_metrics = compute_metrics(yhat, y)
+
+    return test_metrics
+
+
+''' evaluate the layer explanation function as a label prediction in each layer'''
+
+
+def evaluate_explanations_forward_mlp(x,
+                                      y,
+                                      activation,
+                                      w_list,
+                                      q_list,
+                                      u_list,
+                                      ):
+    x = x.to(device)
+    y = y.to(device)
+    activation_fn = activation_dict[activation]
+
+    yhats = []
+    for l in range(len(w_list) - 1):
+        x = concatenate_ones(x)
+        z = x @ w_list[l]
+        g_a_q = torch.sign(x @ q_list[l])
+        yhat_l = torch.tanh(z - g_a_q) @ torch.linalg.pinv(u_list[l])  # use tanh as a surrogate inverse for sign
+        yhats.append(yhat_l)
+        x = activation_fn(z)
+
+    x = concatenate_ones(x)
+    yhat = x @ w_list[-1]
+    yhats.append(yhat)
+
+    test_metrics = [compute_metrics(yhat, y) for yhat in yhats]
+
+    return test_metrics
+
+
+# </editor-fold>
