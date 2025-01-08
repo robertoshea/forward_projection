@@ -1,0 +1,254 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+
+# <editor-fold desc="Forward conv1d training and evaluation functions (batched)">
+
+'''
+function to perform ridge regression over batches of conv1d inputs (channels last)
+z refers to z_tilde, the target neural pre-activation potential
+'''
+
+
+def ridge_regression_w_conv1d(x_batches, z_batches, reg_factor=10., device=device):
+    x_dim = x_batches[0].shape[-1]
+    z_dim = z_batches[1].shape[-1]
+    gram_mat = torch.zeros((x_dim, x_dim), device=device)
+    xt_z = torch.zeros((x_dim, z_dim), device=device)
+    for x_i, z_i in zip(x_batches, z_batches):
+        x_i = x_i.to(device)
+        z_i = z_i.to(device)
+        x_i = x_i.flatten(start_dim=0, end_dim=1)
+        z_i = z_i.flatten(start_dim=0, end_dim=1)
+        gram_mat += x_i.T @ x_i
+        xt_z += x_i.T @ z_i
+
+    # regularise gram matrix
+    gram_mat += torch.eye(gram_mat.shape[0], device=device) * reg_factor
+    try:
+        gram_inv = torch.inverse(gram_mat)
+    except:
+        print("singular matrix, consider increasing regularisation factor")
+        gram_inv = torch.eye(gram_mat.shape[0], device=device)
+    w_hat = gram_inv @ xt_z
+
+    return w_hat
+
+
+'''
+function to fit convolutional weights. Channels last
+'''
+
+
+def fit_w_conv1d(x_batches,
+                 y_batches,
+                 hidden_dim=32,
+                 reg_factor=10.,
+                 return_qu=False,
+                 activation="relu",
+                 device=device,
+                 training_method="forward_projection",):
+    x_channels = x_batches[0].shape[-1]
+    y_channels = y_batches[0].shape[-1]
+
+    q = torch.randn((x_channels, hidden_dim), device=device)  # data projection matrix
+    u = torch.randn((y_channels, hidden_dim), device=device)  # label projection matrix
+    z_batches = []  # batches of targets
+    for x_i, y_i in zip(x_batches, y_batches):
+
+        x_i = x_i.to(device)
+        y_i = y_i.to(device)
+
+        # project labels
+        y_proj = torch.sign(y_i @ u)
+        match training_method:
+            case "forward_projection":
+                x_proj = torch.sign(x_i @ q)
+            case "label_projection":
+                x_proj = torch.zeros(x_i.shape[:-1] + (u.shape[-1],),
+                                     device=device)
+            case "noisy_label_projection":
+                x_proj = torch.sign(torch.randn(x_i.shape[:-1] + (u.shape[-1],),
+                                                device=device))
+
+        # generate target potentials (z)
+        z_i = x_proj + y_proj
+
+        # transpose distribution of labels
+        if activation_shift_dict[activation] != 0:
+            z_i += activation_shift_dict[activation]
+        if activation_rescale_dict[activation] != 1:
+            z_i *= activation_rescale_dict[activation]
+        z_batches.append(z_i.to("cpu"))
+
+    # model target potentials
+    w = ridge_regression_w_conv1d(x_batches, z_batches, reg_factor=reg_factor)
+
+    if return_qu:
+        return w, q, u
+    else:
+        return w, None, None
+
+
+'''
+function to fit conv1d neural network (channels last)
+convolutional pyramid neural network
+'''
+
+
+def train_forward_conv1d(x,
+                         y,
+                         training_method,
+                         activation='relu',
+                         hidden_dim=32,
+                         n_blocks=4,
+                         kernel_size=3,
+                         batch_size=100,
+                         return_qu=False,
+                         verbose=False,
+                         device=device,
+                         ):
+    with torch.no_grad():
+
+        activation_fn = activation_dict[activation]
+
+        if y.ndim == 2:
+            y = torch.unsqueeze(y, dim=1)
+
+        # define hidden layer dimensions for convolutional pyramid
+        hidden_dims = [round(hidden_dim * 2 ** (i // 2)) for i in range(n_blocks * 2)]
+
+        start_time = time.perf_counter()
+        w_list = []
+        q_list = []
+        u_list = []
+
+        rand_idx = torch.randperm(len(x))
+        x_batches = list(torch.split(x[rand_idx], split_size_or_sections=batch_size))
+        y_batches = list(torch.split(y[rand_idx], split_size_or_sections=batch_size))
+
+        # fit hidden layers
+        for l in range(len(hidden_dims)):
+
+            if verbose:
+                print('fitting layer', l)
+
+            # pooling
+            step_size = 2 - ((l + 1) % 2)
+
+            # convolution
+            for i in range(len(x_batches)):
+                x_i = x_batches[i]
+                x_i = x_i.unfold(dimension=1, size=kernel_size, step=step_size).flatten(start_dim=2)
+                x_i = concatenate_ones(x_i)
+                x_batches[i] = x_i
+
+            # fitting hidden weights
+            if training_method == "random":
+                w = torch.randn((x_batches[0].shape[-1], hidden_dims[l]), device=device)
+                w /= w.norm(dim=-1, keepdim=True)
+            if training_method in ["forward_projection", "label_projection", "noisy_label_projection"]:
+                w, q, u = fit_w_conv1d(x_batches,
+                                       y_batches,
+                                       hidden_dim=hidden_dims[l],
+                                       activation=activation,
+                                       training_method=training_method,
+                                       return_qu=return_qu,
+                                       )
+                q_list.append(q)
+                u_list.append(u)
+            w_list.append(w)
+
+            # forward pass
+            x_batches = [activation_fn(x_i.to(device) @ w).to("cpu") for x_i in x_batches]
+
+        # fitting output layer
+        if verbose:
+            print('fitting output layer')
+        for i in range(len(x_batches)):
+            x_batches[i] = concatenate_ones(x_batches[i])
+            x_batches[i] = torch.mean(x_batches[i], dim=1, keepdim=True)
+            y_batches[i] = 2 * y_batches[i] - 1
+
+        # fit output layer weights
+        w = ridge_regression_w_conv1d(x_batches, y_batches, reg_factor=1)  # 1
+
+        w_list.append(w)
+        end_time = time.perf_counter()
+        training_time = end_time - start_time
+
+        return w_list, q_list, u_list, training_time
+
+
+def evaluate_forward_conv1d(x,
+                            y,
+                            w_list,
+                            activation,
+                            kernel_size=3,
+                            batch_size=1000
+                            ):
+    activation_fn = activation_dict[activation]
+    x_batches = torch.split(x, split_size_or_sections=batch_size)
+
+    yhat = []
+    for x_i in x_batches:
+        x_i = x_i.to(device)
+
+        for l in range(len(w_list) - 1):
+            # convolution and pooling
+            stride = 2 - ((l + 1) % 2)
+            x_i = x_i.unfold(dimension=1, size=kernel_size, step=stride).flatten(start_dim=2)
+            x_i = concatenate_ones(x_i)
+
+            # forward
+            x_i = activation_fn(x_i @ w_list[l])
+
+        # output
+        x_i = concatenate_ones(x_i)
+        y = torch.squeeze(y)
+        x_i = torch.mean(x_i, dim=1)
+        yhat_i = x_i @ w_list[-1]
+        yhat.append(yhat_i.to("cpu"))
+
+    yhat = torch.concatenate(yhat)
+
+    metrics = compute_metrics(yhat, y)
+
+    return metrics
+
+
+# </editor-fold>
