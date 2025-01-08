@@ -1,0 +1,62 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+
+# <editor-fold desc="Activation Functions">
+
+def mod2(x):
+    return x % 2
+
+activation_dict = {"relu": torch.relu,
+                   "mod2": mod2,
+                   "square": torch.square,
+                   }
+activation_shift_dict = {"relu": 0,
+                         "mod2": 0.5,
+                         "square": 0.5,
+
+                         }
+activation_rescale_dict = {"relu": 1,
+                           "mod2": 1,
+                           "square": 1,
+                           }
+
+
+sgd_activations = list(activation_dict.keys())
+forward_activations = list(activation_dict.keys())
+
+# </editor-fold>
