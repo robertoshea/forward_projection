@@ -1,0 +1,290 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+# <editor-fold desc="SGD mlp training and evaluation functions">
+
+class mlpModel(nn.Module):
+    def __init__(self,
+                 training_method,
+                 activation_fn,
+                 in_features=None,
+                 hidden_dims=None,
+                 num_classes=None,
+                 ):
+        super(mlpModel, self).__init__()
+        self.activation_fn = activation_fn
+        self.in_features = [in_features] + hidden_dims
+        if training_method == "forward_forward":
+            self.in_features[0] += num_classes
+        self.out_features = hidden_dims + [num_classes]
+        self.layers = nn.ModuleList(
+            [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.in_features, self.out_features)])
+        self.training_method = training_method
+        self.detach_output = training_method != "backprop"
+        if training_method == "backprop":
+            self.opt = torch.optim.Adam(self.layers.parameters(), )
+        if training_method in ["local_supervision"]:
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+        if training_method == "forward_forward":
+            self.opts = [torch.optim.Adam(layer_l.parameters(),
+                                          lr=0.03) for layer_l in self.layers]
+        if training_method == "local_supervision":
+            self.ls_layers = nn.ModuleList([nn.Linear(out_l, num_classes) for out_l in hidden_dims])
+
+    def forward(self, x):
+        for layer_l in self.layers[:-1]:
+            x = layer_l(x)
+            x = self.activation_fn(x)
+        if self.detach_output:
+            x = torch.detach(x)
+        x = self.layers[-1](x)
+        return x
+
+    def forward_ls(self, x):
+        yhats = []
+        for layer_l, ls_layer_l in zip(self.layers[:-1], self.ls_layers):
+            x = layer_l(x)
+            x = self.activation_fn(x)
+            yhat_l = ls_layer_l(x)
+            yhats.append(yhat_l)
+            x = torch.detach(x)
+        yhats.append(self.layers[-1](x))
+        return yhats
+
+    def forward_ff(self, xy):
+        goodnesses = []
+        for layer_l in self.layers[:-1]:
+            xy = xy / (xy.norm(dim=1, keepdim=True) + 0.001)
+            xy = layer_l(xy)
+            xy = self.activation_fn(xy)
+            goodness_l = xy.square().mean(dim=1)
+            goodnesses.append(goodness_l)
+            xy = torch.detach(xy)
+        return goodnesses
+
+
+def train_sgd(model,
+              x,
+              y,
+              loss_fn,
+              batch_size=10):
+    torch.cuda.empty_cache()
+    model.train()
+
+    # training
+    rand_idx = torch.randperm(len(x))
+    x_batches = torch.split(x[rand_idx], split_size_or_sections=batch_size)
+    y_batches = torch.split(y[rand_idx], split_size_or_sections=batch_size)
+    train_loss = 0
+    if model.training_method == "backprop":
+        for x_i, y_i in zip(x_batches, y_batches):
+            x_i = x_i.to(device)
+            y_i = y_i.to(device)
+            yhat_i = model(x_i)
+            loss = loss_fn(yhat_i, y_i)
+            model.opt.zero_grad()
+            loss.backward()
+            model.opt.step()
+            train_loss += loss
+    if model.training_method == "local_supervision":
+        for x_i, y_i in zip(x_batches, y_batches):
+            x_i = x_i.to(device)
+            y_i = y_i.to(device)
+            yhats = model.forward_ls(x_i)
+            for l in range(len(yhats)):
+                loss_l = loss_fn(yhats[l], y_i)
+                model.opts[l].zero_grad()
+                loss_l.backward(inputs=tuple(model.layers[l].parameters()))
+                model.opts[l].step()
+            train_loss += loss_l / len(yhats)
+    if model.training_method == "forward_forward":
+        for x_i, y_i in zip(x_batches, y_batches):
+            x_i = x_i.to(device)
+            y_i = y_i.to(device)
+            y_neg_i = torch.argmax(torch.rand_like(y_i) - y_i, dim=1).to(device)
+            y_neg_i = torch.eye(y_i.shape[1]).to(device)[y_neg_i]
+            while y_i.ndim < x_i.ndim:
+                y_i = torch.unsqueeze(y_i, dim=-1)
+                y_neg_i = torch.unsqueeze(y_neg_i, dim=-1)
+            y_i = y_i.repeat(repeats=(1, 1) + x_i.shape[2:])
+            y_neg_i = y_neg_i.repeat(repeats=(1, 1) + x_i.shape[2:])
+            xy_pos = torch.concatenate([x_i, y_i], dim=1)
+            xy_neg = torch.concatenate([x_i, y_neg_i], dim=1)
+            g_pos = model.forward_ff(xy_pos)
+            g_neg = model.forward_ff(xy_neg)
+            for l in range(len(g_pos)):
+                loss_l = torch.log(1 + torch.exp(torch.concatenate([2 - g_pos[l], g_neg[l] - 2]))).mean()
+                model.opts[l].zero_grad()
+                loss_l.backward(inputs=tuple(model.layers[l].parameters()))
+                model.opts[l].step()
+                train_loss += loss_l / len(x_batches)
+    train_loss /= len(x_batches)
+
+    return train_loss
+
+
+def validate_sgd(model,
+                 x,
+                 y,
+                 loss_fn,
+                 batch_size=25, ):
+    torch.cuda.empty_cache()
+    model.eval()
+    with torch.no_grad():
+        val_loss = 0
+        x_batches = torch.split(x, split_size_or_sections=batch_size)
+        y_batches = torch.split(y, split_size_or_sections=batch_size)
+        if model.training_method in ["backprop", "local_supervision"]:
+            for x_i, y_i in zip(x_batches, y_batches):
+                x_i = x_i.to(device)
+                y_i = y_i.to(device)
+                yhat_i = model(x_i)
+                loss_i = loss_fn(yhat_i, y_i)
+                val_loss += loss_i
+        if model.training_method == "forward_forward":
+            for x_i, y_i in zip(x_batches, y_batches):
+                x_i = x_i.to(device)
+                y_i = y_i.to(device)
+                y_neg_i = torch.argmax(torch.rand_like(y_i) - y_i, dim=1).to(device)
+                y_neg_i = torch.eye(y_i.shape[1]).to(device)[y_neg_i]
+                while y_i.ndim < x_i.ndim:
+                    y_i = torch.unsqueeze(y_i, dim=-1)
+                    y_neg_i = torch.unsqueeze(y_neg_i, dim=-1)
+                y_i = y_i.repeat(repeats=(1, 1) + x_i.shape[2:])
+                y_neg_i = y_neg_i.repeat(repeats=(1, 1) + x_i.shape[2:])
+                xy_pos = torch.concatenate([x_i, y_i], dim=1)
+                xy_neg = torch.concatenate([x_i, y_neg_i], dim=1)
+                g_pos = model.forward_ff(xy_pos)
+                g_neg = model.forward_ff(xy_neg)
+                for g_pos_l, g_neg_l in zip(g_pos, g_neg):
+                    loss_l = torch.log(1 + torch.exp(torch.concatenate([2 - g_pos_l, g_neg_l - 2]))).mean()
+                    val_loss += loss_l / len(g_pos)
+        val_loss /= len(x_batches)
+        return val_loss
+
+
+def evaluate_sgd(model,
+                 x,
+                 y,
+                 batch_size=25,
+                 ):
+    model.eval()
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+        x_batches = torch.split(x, split_size_or_sections=batch_size)
+        if model.training_method in ["backprop", "local_supervision"]:
+            yhat = [model(x_i.to(device)) for x_i in x_batches]
+        if model.training_method == "forward_forward":
+            yhat = []
+            n_classes = y.shape[1]
+            for x_i in x_batches:
+                x_i = x_i.to(device)
+                y_candidates = torch.eye(n_classes).unsqueeze(1).repeat(1, len(x_i), 1).to(device)
+                while y_candidates.ndim < (x_i.ndim + 1):
+                    y_candidates = torch.unsqueeze(y_candidates, dim=-1)
+                y_candidates = y_candidates.repeat(repeats=(1, 1, 1) + x_i.shape[2:])
+                yhat_i = torch.zeros((len(x_i), n_classes))
+                for j in range(n_classes):
+                    xy_ij = torch.concatenate([x_i, y_candidates[j]], dim=1)
+                    goodness_i = model.forward_ff(xy_ij)
+                    yhat_i[:, j] = torch.mean(torch.stack(goodness_i), dim=0)
+                yhat.append(yhat_i)
+
+        yhat = torch.concatenate(yhat)
+        metrics = compute_metrics(yhat, y)
+        return metrics
+
+
+def train_sgd_mlp(X_train,
+                  Y_train,
+                  X_val,
+                  Y_val,
+                  activation,
+                  training_method,
+                  hidden_dims=[1000] * 3,
+                  patience=5,
+                  max_epochs=100,
+                  batch_size=50,
+                  verbose=False,
+                  loss_fn=torch.nn.CrossEntropyLoss()):
+    torch.cuda.empty_cache()
+    start_time = time.perf_counter()
+    activation_fn = activation_dict[activation]
+
+    in_features = X_train.shape[1]
+    model = mlpModel(
+        training_method=training_method,
+        in_features=in_features,
+        hidden_dims=hidden_dims,
+        num_classes=Y_train.shape[1],
+        activation_fn=activation_fn,
+    ).to(device)
+    train_loss = []
+    val_loss = []
+    best_val_loss = torch.inf
+    patience_counter = 0
+    for epoch_i in range(max_epochs):
+        train_loss_i = train_sgd(model=model,
+                                 x=X_train,
+                                 y=Y_train,
+                                 loss_fn=loss_fn,
+                                 batch_size=batch_size)
+        train_loss.append(train_loss_i.item())
+        val_loss_i = validate_sgd(model=model,
+                                  x=X_val,
+                                  y=Y_val,
+                                  loss_fn=loss_fn,
+                                  batch_size=batch_size)
+        val_loss.append(val_loss_i.item())
+        if verbose:
+            print(val_loss_i)
+        if val_loss_i < best_val_loss:
+            best_val_loss = val_loss_i
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if patience_counter == (patience - 1):
+            break
+
+    end_time = time.perf_counter()
+    training_time = end_time - start_time
+    training_epochs = epoch_i
+
+    return model, training_time, training_epochs
+
+
+# </editor-fold>
