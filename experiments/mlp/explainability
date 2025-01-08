@@ -1,0 +1,103 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+
+# <editor-fold desc="MLP explainability">
+
+import matplotlib.pyplot as plt
+
+image_dir = "images_" + date_today
+if not os.path.exists(image_dir):
+    os.mkdir(image_dir)
+
+verbose = False
+model_parameters = expand_grid({
+
+    'fold': list(range(5)),
+    'training_method': ["forward_projection"],
+    'activation': ['relu', ],
+    'hidden_dim': [1000, ],
+})
+
+dataset_i = "FashionMNIST"
+explainability_mlp_experiments = []
+print(dataset_i)
+X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i)
+for model_parameters_i in range(len(model_parameters)):
+    print(model_parameters_i)
+
+    fold = model_parameters.fold[model_parameters_i]
+    training_method = model_parameters.training_method[model_parameters_i]
+    activation = model_parameters.activation[model_parameters_i]
+    reg_factor = model_parameters.hidden_dim[model_parameters_i]
+
+    n_hidden_layers = 4
+    hidden_dims = [1000] * n_hidden_layers
+
+    train_folds = folds != fold
+    val_folds = torch.logical_not(train_folds)
+    X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+    Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+    w_list, q_list, u_list, training_time = train_forward_mlp(x=X_train,
+                                                              y=Y_train,
+                                                              training_method=training_method,
+                                                              activation=activation,
+                                                              hidden_dims=[1000, 1000, 1000],
+                                                              return_qu=True,
+                                                              )
+
+    test_metrics = evaluate_explanations_forward_mlp(x=X_test,
+                                                     y=Y_test,
+                                                     activation=activation,
+                                                     w_list=w_list,
+                                                     q_list=q_list,
+                                                     u_list=u_list,
+                                                     input_dependent=True)
+    print(test_metrics)
+
+    for i in range(n_hidden_layers):
+        out_i = {
+            'layer': i + 1,
+            'activation': activation,
+            'test_acc': test_metrics[i][1].item()
+        }
+        explainability_mlp_experiments.append(out_i)
+
+explainability_mlp_experiments = pd.DataFrame(explainability_mlp_experiments)
+output_file = os.path.join(output_dir, "explainability_mlp_experiments.csv")
+explainability_mlp_experiments.to_csv(path_or_buf=output_file)
+
+# </editor-fold>
