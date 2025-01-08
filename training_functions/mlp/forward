@@ -109,10 +109,7 @@ def fit_w(x, y, hidden_dim=16,
 '''add column of ones to represent intercept'''
 
 
-def concatenate_ones(x):
-    ones_vec = torch.ones_like(x[..., -1, None,])
-    x = torch.concatenate([x, ones_vec], dim=-1)
-    return x
+
 
 
 ''' train MLP and return weights and projection matrices'''
