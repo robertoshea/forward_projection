@@ -1,0 +1,99 @@
+
+# <editor-fold desc="Organising results">
+
+training_method_names = {
+    "forward_projection": "FP",
+    "random": "Random",
+    "label_projection": "LP",
+    "noisy_label_projection": "LPN",
+    "local_supervision": "LS",
+    "forward_forward": "FF",
+    "backprop": "BP",
+}
+
+
+pd.options.mode.copy_on_write = True
+
+results_files = [os.path.join(output_dir, i) for i in os.listdir(output_dir) if
+                 "_experiments.csv" in i]
+results_tables = [pd.read_csv(i, index_col=0, header=0) for i in results_files]
+mlp_tables = pd.concat([results_tables[i] for i in range(5) if "mlp" in results_files[i]])
+conv1d_tables = [results_tables[i] for i in range(5) if "conv1d" in results_files[i]]
+conv1d_tables[0]["training_epochs"] = 1
+conv1d_tables = pd.concat(conv1d_tables)
+conv1d_tables = conv1d_tables.drop(['hidden_dim', 'n_blocks'], axis=1)
+all_tables = pd.concat([mlp_tables, conv1d_tables])
+
+all_tables.columns = all_tables.columns.str.replace("_", " ")
+all_tables.columns = all_tables.columns.str.title()
+all_tables.columns = [x.replace("Training Method", "Method") for x in all_tables.columns]
+all_tables.columns = [x.replace("Test ", "") for x in all_tables.columns]
+all_tables.columns = [x.replace("Auc", "AUC") for x in all_tables.columns]
+all_tables.Method = all_tables.Method.replace(training_method_names)
+all_tables.Method = pd.Categorical(all_tables.Method,
+                                   categories=training_method_names.values())
+
+all_tables.Dataset = all_tables.Dataset.replace({"ptbxl_mi": "PTBXL-MI", "human_nontata_promoters": "Promoters"})
+all_tables = all_tables.loc[all_tables.Dataset.isin(['FashionMNIST', 'Promoters', 'PTBXL-MI'])].reset_index()
+all_tables.Dataset = pd.Categorical(all_tables.Dataset, categories=['FashionMNIST', 'Promoters', 'PTBXL-MI'])
+
+#relu activated performance
+all_perf = all_tables.loc[all_tables.Activation == "relu"]
+all_perf = all_perf.loc[all_perf.Method.isin(['FP', 'Random', 'LS', 'FF', 'BP'])]
+all_perf = all_perf.drop(labels=["Activation"], axis=1)
+all_perf = all_perf.groupby(['Dataset', 'Method', ], observed=True).aggregate(mean_sd_func2)[['Acc', "AUC", ]]
+all_perf = pd.melt(all_perf, ignore_index=False,
+                   var_name='Metric')  # id_vars=['dataset', 'training_method',  'activation'])
+all_perf.reset_index(inplace=True)
+all_perf = all_perf.pivot(index=["Dataset", "Metric", ],
+                          columns="Method",
+                          values=["value"]
+                          )
+
+all_perf.to_csv(os.path.join(output_dir, "main_perf.csv"))
+all_perf.to_latex(os.path.join(output_dir, "main_perf.tex"))
+
+# mod2 and square activated performance
+all_perf = all_tables.copy()
+all_perf = all_perf.loc[all_perf.Method.isin(['FP', "LS", "FF", 'BP'])]
+all_perf = all_perf.loc[all_perf.Activation.isin(["mod2", "square"])]
+all_perf.Activation = all_perf.Activation.replace({"sign_surrogate": "sign"})
+all_perf = all_perf.groupby(['Dataset', 'Method', 'Activation'], observed=True).aggregate(mean_sd_func2)[['Acc']]
+all_perf = pd.melt(all_perf, ignore_index=False,
+                   var_name='Metric')  # id_vars=['dataset', 'training_method',  'activation'])
+all_perf.reset_index(inplace=True)
+all_perf = all_perf.pivot(index=["Dataset", 'Activation'],
+                          columns="Method",
+                          values=["value"]
+                          )
+all_perf.to_csv(os.path.join(output_dir, "activation_perf.csv"))
+all_perf.to_latex(os.path.join(output_dir, "activation_perf.tex"))
+
+
+# timing performance
+def time_mean_sd_func(x):
+    mu = x.mean()
+    sd = x.std()
+    out = f"{mu:.1f} \u00B1 {sd:.1f}"
+    return out
+
+
+all_timing = all_tables.copy()
+all_timing = all_timing.loc[all_timing.Activation == "relu"].reset_index()
+all_timing = all_timing.drop(axis=1, columns=["Activation"])
+all_timing = all_timing.groupby(['Dataset', 'Method'], observed=True).aggregate(time_mean_sd_func)[
+    ['Training Time', 'Training Epochs']]
+all_timing = pd.melt(all_timing, ignore_index=False,
+                     var_name='Metric')  # id_vars=['dataset', 'training_method',  'activation'])
+all_timing.reset_index(inplace=True)
+all_timing = all_timing.groupby(['Dataset', 'Metric', 'Method'], observed=True).aggregate(identity_func)
+all_timing.reset_index(inplace=True)
+all_timing = all_timing.pivot(index=["Dataset", "Metric"],
+                              columns="Method",
+                              values=["value"]
+                              )
+all_timing.to_csv(os.path.join(output_dir, "all_timing.csv"))
+
+all_timing.to_latex(os.path.join(output_dir, "all_timing.tex"))
+
+# </editor-fold>
