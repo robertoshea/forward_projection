@@ -1,0 +1,160 @@
+
+# <editor-fold desc="Explainability Conv2d visualisation">
+
+img_size = 128
+dataset_i = "oct"
+explainability_mlp_experiments = []
+print(dataset_i)
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i, img_size=img_size)
+
+train_folds = folds != 0
+val_folds = torch.logical_not(train_folds)
+X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+attn_maps = [torch.zeros(1, 1, 1, 1)] * 3
+for rep_i in range(5):
+
+    print(rep_i)
+
+    n_sample = 100
+    n_train = round(n_sample * 0.8)
+    n_val = n_sample - n_train
+
+    X_train_s, Y_train_s = subsample_dataset(X_train,
+                                             Y_train,
+                                             n_sample=n_train)
+    X_val_s, Y_val_s = subsample_dataset(X_train,
+                                         Y_train,
+                                         n_sample=n_val)
+
+    X_trainval_s = torch.concatenate([X_train_s, X_val_s])
+    Y_trainval_s = torch.concatenate([Y_train_s, Y_val_s])
+
+    hidden_dim = 32
+    n_blocks = 4
+    activation = "relu"
+    training_method = "forward_projection"
+    seed = rep_i
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    n_sample_test = 10
+    w_list, q_list, u_list, training_time = train_forward_conv2d(x=X_trainval_s,
+                                                                 y=Y_trainval_s,
+                                                                 training_method=training_method,
+                                                                 hidden_dim=hidden_dim,
+                                                                 activation=activation,
+                                                                 n_blocks=n_blocks,
+                                                                 device=device,
+                                                                 reg_factor=10,
+                                                                 batch_size=5,
+                                                                 return_qu=True,
+                                                                 )
+
+    seed = 2
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    n_sample_test = 3
+    X_test_s, Y_test_s = subsample_dataset(X_test, Y_test, n_sample=n_sample_test)
+
+    # selected_idx = [306]
+    x_img = X_test_s.to(device)
+    # x_img[x_img> 0.96] = 0
+    x = torch.clone(x_img)
+    activation_fn = torch.relu
+    # yhats = []
+    # timesteps = []
+    # timestep = torch.arange(x_i.shape[1])[None, :, None]
+    # input_dependent=True
+
+    resize_transform = torchvision.transforms.Resize(size=(img_size, img_size))
+
+    kernel_size = 3
+    # attn_maps = []
+    for l in range(6):
+
+        # pooling
+        stride = 2 - ((l + 1) % 2)
+        x = x.unfold(dimension=1, size=kernel_size, step=stride)  #
+        x = x.unfold(dimension=2, size=kernel_size, step=stride)  #
+        x = x.flatten(start_dim=3)
+        x = concatenate_ones(x)
+
+        x_pre = torch.clone(x)
+
+        z = x @ w_list[l]
+
+        if l % 2 == 1:
+            g_a_q = torch.sign(x_pre @ q_list[l])
+            # yhat = z @ torch.linalg.pinv(u_list[l])
+            yhat = torch.tanh(z - g_a_q) @ torch.linalg.pinv(u_list[l])
+            yhat = resize_transform(yhat.permute((0, 3, 1, 2))).permute((0, 2, 3, 1))
+            # yhat = torch.softmax(yhat, dim=-1) ** 3
+            # attn_maps.append(yhat)
+            attn_maps[l // 2] = attn_maps[l // 2] + yhat.to("cpu")
+
+        x = activation_fn(z)
+
+attn_maps = [torch.softmax(i, dim=-1) ** 3 for i in attn_maps]
+
+plt.close()
+fig, axes = plt.subplots(4, 4)
+plt.setp(axes, xticks=[], yticks=[])
+examples = [n_sample_test + 0, n_sample_test + 1, n_sample_test + 2, 0, ]
+
+vmin_list = [attn_i.min() for attn_i in attn_maps]
+vmax_list = [attn_i.max() for attn_i in attn_maps]
+
+for j in range(4):
+
+    example_j = examples[j]
+
+    x_i = -x_img[example_j, :, :, 0].cpu().numpy()
+
+    for i in range(4):
+        axes[i, j].imshow(x_i, cmap="Greys")
+
+    for i in range(3):
+        attn_i = attn_maps[i][example_j, :, :, 1].cpu().numpy()
+        axes[i + 1, j].imshow(attn_i,
+                              alpha=0.5,
+                              vmin=vmin_list[i],
+                              vmax=vmax_list[i], cmap="rainbow",
+                              interpolation='nearest'
+                              )
+
+axes[0, 0].set_ylabel("Input", rotation=0, labelpad=35)
+axes[1, 0].set_ylabel("$\hat{y}_2$", fontsize=14, rotation=0, labelpad=35)
+axes[2, 0].set_ylabel("$\hat{y}_4$", fontsize=14, rotation=0, labelpad=35)
+axes[3, 0].set_ylabel("$\hat{y}_6$", fontsize=14, rotation=0, labelpad=35)
+
+for j in range(4):
+    axes[0, j].set_title("Patient " + ["A", "B", "C", "D"][j])
+
+plt.tight_layout()
+
+if False:
+    plt.savefig(
+        os.path.join("images/oct_attn_04_12_24.pdf"),
+        dpi=600
+    )
+    plt.savefig(
+        os.path.join("images/oct_attn_03_12_24.pdf"),
+        dpi=600
+    )
+    plt.savefig(
+        os.path.join("images/oct_attn_03_12_24.png"),
+        dpi=600
+    )
+
+# </editor-fold>
