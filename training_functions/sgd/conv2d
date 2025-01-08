@@ -1,0 +1,181 @@
+
+# <editor-fold desc="load libraries">
+import numpy as np
+import os
+import pandas as pd
+import torchvision
+import torch
+import torch.nn as nn
+import torchmetrics
+import json
+from itertools import product
+from torchvision import datasets
+from torchvision.transforms import ToTensor
+from datetime import date
+import time
+import random
+import wfdb
+
+import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.rcParams["mathtext.fontset"] = "cm"
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
+
+
+# </editor-fold>
+# <editor-fold desc="SGD conv2d training and evaluation functions">
+
+class conv2dModel(nn.Module):
+    def __init__(self,
+                 training_method,
+                 activation_fn,
+                 in_features=None,
+                 hidden_dims=None,
+                 num_classes=None,
+                 kernel_size=3,
+                 lr=0.001
+                 ):
+        super().__init__()
+        self.activation_fn = activation_fn
+        self.in_features = [in_features] + hidden_dims
+        if training_method == "forward_forward":
+            self.in_features[0] += num_classes
+        self.out_features = hidden_dims + [num_classes]
+        self.layers = []
+        for in_l, out_l in zip(self.in_features[:-1], self.out_features[:-1]):
+            self.layers.append(nn.Conv2d(in_l, out_l, kernel_size))
+        self.layers.append(nn.Linear(self.in_features[-1], self.out_features[-1]))
+        self.layers = nn.ModuleList(self.layers)
+        self.batch_norms = nn.ModuleList([nn.BatchNorm2d(out_l) for out_l in hidden_dims[1::2]])
+        self.training_method = training_method
+        if training_method == "backprop":
+            self.opt = torch.optim.Adam(self.layers.parameters(), lr=lr)
+        if training_method == "local_supervision":
+            self.ls_layers = nn.ModuleList(
+                [nn.Linear(out_l, num_classes) for out_l in hidden_dims])
+            self.opts = [torch.optim.Adam(layer_l.parameters(), lr=lr) for layer_l in self.layers]
+        if training_method == "forward_forward":
+            self.opts = [torch.optim.Adam(layer_l.parameters(),
+                                          lr=lr) for layer_l in self.layers]
+
+    def forward(self, x):
+        for l in range(len(self.layers) - 1):
+            x = self.layers[l](x)
+            x = self.activation_fn(x)
+            if l % 2:
+                x = x[..., ::2, ::2]
+                if l < len(self.batch_norms):
+                    x = self.batch_norms[l // 2](x)
+        x = torch.mean(x, dim=(2, 3))
+        yhat = self.layers[-1](x)
+        return yhat
+
+    def forward_ls(self, x):
+        yhats = []
+        for l in range(len(self.layers) - 1):
+            x = self.layers[l](x)
+            x = self.activation_fn(x)
+            x_mu = torch.mean(x, dim=(2, 3))
+            yhat_l = self.ls_layers[l](x_mu)
+            yhats.append(yhat_l)
+            if l % 2:
+                x = x[..., ::2, ::2]
+                if l < len(self.batch_norms):
+                    x = self.batch_norms[l // 2](x)
+            x = torch.detach(x)
+        x = torch.mean(x, dim=(2, 3))
+        yhat = self.layers[-1](x)
+        yhats.append(yhat)
+        return yhats
+
+    def forward_ff(self, xy):
+        goodnesses = []
+        for l in range(len(self.layers) - 1):
+            xy = xy / (xy.norm(dim=1, keepdim=True) + 0.001)
+            xy = self.layers[l](xy)
+            xy = self.activation_fn(xy)
+            goodness_l = xy.square().mean(dim=(1, 2, 3))
+            goodnesses.append(goodness_l)
+            if l % 2:
+                xy = xy[..., ::2, ::2]
+                if l < len(self.batch_norms):
+                    xy = self.batch_norms[l // 2](xy)
+            xy = torch.detach(xy)
+        return goodnesses
+
+
+def train_sgd_conv2d(X_train,
+                     Y_train,
+                     X_val,
+                     Y_val,
+                     hidden_dims,
+                     activation,
+                     training_method,
+                     kernel_size=3,
+                     patience=5,
+                     max_epochs=50,
+                     batch_size=5,
+                     verbose=False,
+                     loss_fn=torch.nn.CrossEntropyLoss(),
+                     lr=0.001
+                     ):
+    torch.cuda.empty_cache()
+    start_time = time.perf_counter()
+
+    activation_fn = activation_dict[activation]
+    model = conv2dModel(
+        in_features=X_train.shape[1],
+        hidden_dims=hidden_dims,
+        num_classes=Y_train.shape[1],
+        activation_fn=activation_fn,
+        kernel_size=kernel_size,
+        training_method=training_method,
+        lr=lr
+    ).to(device)
+    train_loss = []
+    val_loss = []
+    best_val_loss = torch.inf
+    patience_counter = 0
+    for epoch_i in range(max_epochs):
+        train_loss_i = train_sgd(model=model,
+                                 x=X_train,
+                                 y=Y_train,
+                                 loss_fn=loss_fn,
+                                 batch_size=batch_size
+                                 )
+        train_loss.append(train_loss_i.item())
+        val_loss_i = validate_sgd(model=model,
+                                  x=X_val,
+                                  y=Y_val,
+                                  loss_fn=loss_fn,
+                                  batch_size=batch_size)
+        val_loss.append(val_loss_i.item())
+        if verbose:
+            print(val_loss_i)
+        if val_loss_i < best_val_loss:
+            best_val_loss = val_loss_i
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if patience_counter == (patience - 1):
+            break
+
+    end_time = time.perf_counter()
+    training_time = end_time - start_time
+    training_epochs = epoch_i
+
+    return model, training_time, training_epochs
+
+
+# </editor-fold>
