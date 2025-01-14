@@ -1,0 +1,65 @@
+
+forward_training_methods = ["forward_projection",]
+sgd_training_methods = ["backprop", "local_supervision", "forward_forward"]
+all_training_methods = forward_training_methods + sgd_training_methods
+
+experiment_parameters = expand_grid({
+    'rep': list(range(5)),
+    'fold': list(range(5)),
+    "training_method": all_training_methods
+})
+
+seed = 0
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+
+X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset("FashionMNIST")
+activation = "relu"
+hidden_dims = [1000] * 3
+
+timing_experiments = []
+for experiment_i in range(len(experiment_parameters)):
+
+    print(experiment_i)
+
+    training_method = experiment_parameters.training_method[experiment_i]
+    fold = experiment_parameters.fold[experiment_i]
+    train_folds = folds != fold
+    val_folds = torch.logical_not(train_folds)
+    X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+    Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+    if training_method in forward_training_methods:
+        _, training_time = train_forward_mlp(x=X_train,
+                                             y=Y_train,
+                                             training_method=training_method,
+                                             activation=activation,
+                                             hidden_dims=hidden_dims,
+                                             )
+    else:
+        _, training_time, _ = train_sgd_mlp(X_train=X_train,
+                                            Y_train=Y_train,
+                                            X_val=X_val,
+                                            Y_val=Y_val,
+                                            activation=activation,
+                                            training_method=training_method,
+                                            hidden_dims=hidden_dims,
+                                            batch_size=50,
+                                            verbose=False,
+                                            patience=100,
+                                            max_epochs=100)
+
+    out_i = {
+        "training_method": training_method,
+        "training_time": training_time,
+    }
+    timing_experiments.append(out_i)
+
+
+
+timing_experiments = pd.DataFrame(timing_experiments)
+output_file = os.path.join(output_dir, "timing_experiments.csv")
+timing_experiments.to_csv(path_or_buf=output_file)
+
+timing_experiments.groupby(['training_method'], observed=True).aggregate(mean_sd_func)
