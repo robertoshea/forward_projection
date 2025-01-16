@@ -68,7 +68,7 @@ def load_dataset(dataset_i,
                  channels_last=True,
                  toy_dataset=False,
                  img_size=128,
-                 data_dir=r"C:\Users\k1930297\OneDrive - King's College London\Documents\Datasets",
+                 data_dir=r"...\Datasets", # set data directory here
                  ):
     resize_transform = torchvision.transforms.Resize(size=(img_size, img_size))
 
@@ -132,12 +132,30 @@ def load_dataset(dataset_i,
 
     if dataset_i == 'ptbxl_mi':
 
+    
+        #render to npy files for faster loading
+        ptbxl_extraction = False
+        if ptbxl_extraction: 
+
+            # original files downloadable from https://physionet.org/content/ptb-xl/1.0.3/
+            ptbxl_dir = "..."
+            record_names = rec_listdir(ptbxl_dir)
+            record_names = [i for i in record_names if ('records100' in i) or ('records500' in i)]
+            record_names = list(set([i[:-4] for i in record_names]))
+
+            for record_name_full in record_names:
+                record_name = os.path.basename(record_name_full)
+                print(record_name)
+                record = wfdb.io.rdsamp(record_name_full)
+                X = record[0].astype(np.float16)
+                np.save(file=ptbxl_dir + r'/ptbxl_ecgs/' + record_name + '.npy',
+                        arr=X)
+
         # file management
-        ptbxl_dir = "C:\\Users\\k1930297\\Documents\\Datasets\\PTB XL\\PTB XL"
-        ptbxl_npy_dir = os.path.join(ptbxl_dir, 'npy/')
+        ptbxl_npy_dir = os.path.join(data_dir, 'ptbxl_ecgs/')
         os.path.exists(ptbxl_npy_dir)
 
-        ptbxl_key_file = os.path.join(ptbxl_dir, 'scp_statements.csv')
+        ptbxl_key_file = os.path.join(data_dir, 'scp_statements.csv')
         ptbxl_keys = pd.read_csv(ptbxl_key_file)
         ptbxl_keys.rename(columns={ptbxl_keys.columns[0]: "code"}, inplace=True)
         all_dx_classes = ptbxl_keys.diagnostic_class.unique()[:-1].tolist()
@@ -146,7 +164,7 @@ def load_dataset(dataset_i,
         selected_dx_codes = ['STTC', 'NORM', 'MI', 'HYP', 'CD']
 
         # create binary vectors for each outcome class
-        ptbxl_label_file = os.path.join(ptbxl_dir, 'ptbxl_database.csv')
+        ptbxl_label_file = os.path.join(data_dir, 'ptbxl_database.csv')
         ptbxl_labels = pd.read_csv(ptbxl_label_file)
         ptbxl_labels['npy_file'] = [os.path.join(ptbxl_npy_dir, os.path.basename(i)) + '.npy' for i in
                                     ptbxl_labels.filename_lr]
