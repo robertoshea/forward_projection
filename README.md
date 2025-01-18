@@ -11,5 +11,4 @@ Genomic Data 24 (2023). URL http://dx.doi.org/10.1186/s12863-023-01123-8.
 
 OCT and CXR datasets are available in:
 Kermany, D. S. et al. Identifying medical diagnoses and treatable diseases by
-image-based deep learning. Cell 172, 1122–1131.e9 (2018). URL http://dx.doi.
-org/10.1016/j.cell.2018.02.010.
+image-based deep learning. Cell 172, 1122–1131.e9 (2018). URL http://dx.doi.org/10.1016/j.cell.2018.02.010.
