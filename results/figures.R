@@ -8,6 +8,8 @@ library(RColorBrewer)
 library(ggpubr)
 library(latex2exp)
 
+output_dir = "results"
+
 #regression toy diagram
 if(T){
   
@@ -55,21 +57,11 @@ if(T){
     )
   
   ggsave(toy_reg_plot,
-         filename="C:/Users/k1930297/PycharmProjects/ForwardECG/images_16_10_24/toy_reg_plot_notext.png",
+         filename=file.path(output_dir, "toy_reg_plot.png"),
          dpi=600,
          width=2.5,
          height=2.5)
-  
-  
-  
-  
-  #theme(axis.title.x=element_test(),
-  #      axis.text.x=element_blank(),
-  #      axis.ticks.x=element_blank(),
-  #      axis.title.x=element_blank(),
-  #      axis.text.x=element_blank(),
-  #      axis.ticks.x=element_blank()
-  #)  
+
 }
 
 #target gen toy diagram
@@ -97,7 +89,7 @@ if(T){
     annotate("text", x=2.6, y=3.,angle=45, label= TeX("$W_l$"))
   
   ggsave(toy_reg_plot,
-         filename="C:/Users/k1930297/PycharmProjects/ForwardECG/images_16_10_24/toy_reg_plot.png",
+         filename=file.path(output_dir,  "toy_reg_plot.png"),
          dpi=600,
          width=2.5,
          height=2.5)
@@ -138,7 +130,7 @@ if(T){
 
 
 
-output_dir <- "C:/Users/k1930297/PycharmProjects/ForwardECG/tables_06_01_25"
+output_dir <- "results"
 
 
 #few shot performance figure 2
@@ -160,7 +152,6 @@ if(T){
   df_i$training_method[df_i$training_method=="random"] <- "RF"
   df_i$dataset[df_i$dataset=="oct"] <- "OCT"
   df_i$dataset[df_i$dataset=="cxr"] <- "CXR"
-  
   
   df_i$training_method <- factor(df_i$training_method)
   training_method_levels <- levels(df_i$training_method)
@@ -232,7 +223,7 @@ if(T){
   plot_oct_fewshot <- plot_i
   
   #
-  df_i <- read.csv(file.path("C:/Users/k1930297/PycharmProjects/ForwardECG/tables_16_09_24",
+  df_i <- read.csv(file.path(output_dir,
                              "output_dim_experiments.csv"))
   
   
@@ -279,7 +270,7 @@ if(T){
   
   
   #mlp explainability performance tables
-  df_i <- read.csv("C:/Users/k1930297/PycharmProjects/ForwardECG/tables_25_10_24/explainability_mlp_experiments.csv")
+  df_i <- read.csv(file.path(output_dir, "explainability_mlp_experiments.csv"))
   df_i$training_method <- "FP"
   df_i$layer <- df_i$layer+1
   
@@ -313,9 +304,6 @@ if(T){
                                       segment.color = 'grey')
   
   plot_mlp_explain <- plot_i
-  
-  
-  
   
   all_plots_1 <- ggarrange(plotlist=list(plot_fmnist_bottleneck,  plot_cxr_fewshot, plot_oct_fewshot, plot_mlp_explain),
                            labels = c("A",  "B", "C", "D"),
