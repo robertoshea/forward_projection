@@ -1,8 +1,3 @@
-# few shot experiments
-
-# <editor-fold desc="">
-# </editor-fold>
-
 # <editor-fold desc="load libraries">
 import numpy as np
 import os
@@ -18,7 +13,7 @@ from torchvision.transforms import ToTensor
 from datetime import date
 import time
 import random
-import wfdb
+import zipfile
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -36,6 +31,23 @@ print(f"Using {device} device")
 
 from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
 
+
+# </editor-fold>
+
+
+# <editor-fold desc="unzip data">
+data_dir = "/data"
+output_dir = "/results"
+data_unzipped_dir = os.path.join(output_dir, "data_unzipped")
+os.mkdir(data_unzipped_dir)
+
+zip_data_files = ["cxr_pneumonia", "OCT", "ptbxl_ecgs"]
+for file_i in zip_data_files:
+    source_filename =os.path.join(data_dir, file_i) + ".zip"
+    target_filename = os.path.join(data_unzipped_dir, file_i)
+    if not os.path.exists(target_filename):
+        with zipfile.ZipFile(source_filename, "r") as zip_ref:
+            zip_ref.extractall(data_unzipped_dir)
 
 # </editor-fold>
 
@@ -114,15 +126,6 @@ if not os.path.exists("tables"):
 # </editor-fold>
 
 # <editor-fold desc="File Management">
-date_today = date.today().strftime("%d_%m_%y")
-if not os.path.exists("tables"):
-    os.mkdir('tables')
-
-#date_today = "06_01_25"
-output_dir = "tables_" + date_today
-if not os.path.exists(output_dir):
-    os.mkdir(output_dir)
-
 
 def extract_xy(df_i, resize_transform, diagnosis_labels, mode=torchvision.io.ImageReadMode.GRAY):
     x = []
@@ -145,7 +148,7 @@ def load_dataset(dataset_i,
                  channels_last=True,
                  toy_dataset=False,
                  img_size=128,
-                 data_dir=r"C:\Users\k1930297\OneDrive - King's College London\Documents\Datasets",
+                 data_dir=data_unzipped_dir,
                  ):
     resize_transform = torchvision.transforms.Resize(size=(img_size, img_size))
 
@@ -210,11 +213,11 @@ def load_dataset(dataset_i,
     if dataset_i == 'ptbxl_mi':
 
         # file management
-        ptbxl_dir = "C:\\Users\\k1930297\\Documents\\Datasets\\PTB XL\\PTB XL"
-        ptbxl_npy_dir = os.path.join(ptbxl_dir, 'npy/')
+        ptbxl_dir = os.path.join(data_dir, "ptbxl_ecgs")
+        ptbxl_npy_dir = os.path.join(ptbxl_dir, 'npy')
         os.path.exists(ptbxl_npy_dir)
 
-        ptbxl_key_file = os.path.join(ptbxl_dir, 'scp_statements.csv')
+        ptbxl_key_file = '/data/scp_statements.csv'
         ptbxl_keys = pd.read_csv(ptbxl_key_file)
         ptbxl_keys.rename(columns={ptbxl_keys.columns[0]: "code"}, inplace=True)
         all_dx_classes = ptbxl_keys.diagnostic_class.unique()[:-1].tolist()
@@ -223,7 +226,7 @@ def load_dataset(dataset_i,
         selected_dx_codes = ['STTC', 'NORM', 'MI', 'HYP', 'CD']
 
         # create binary vectors for each outcome class
-        ptbxl_label_file = os.path.join(ptbxl_dir, 'ptbxl_database.csv')
+        ptbxl_label_file = '/data/ptbxl_database.csv'
         ptbxl_labels = pd.read_csv(ptbxl_label_file)
         ptbxl_labels['npy_file'] = [os.path.join(ptbxl_npy_dir, os.path.basename(i)) + '.npy' for i in
                                     ptbxl_labels.filename_lr]
@@ -297,10 +300,6 @@ def load_dataset(dataset_i,
             "repeat": [i.split("-")[2][:-5] for i in all_files_basenames],
             "train_idx": ["train" in i for i in all_files]
         })
-        # img_metadata = img_metadata.loc[img_metadata.diagnosis!="VIRUS"].reset_index(drop=True)
-        # img_metadata.loc[img_metadata.diagnosis.isin(["BACTERIA", "VIRUS"]), "diagnosis"] = "PNEUMONIA"
-        # img_metadata.loc[img_metadata.diagnosis.isin(["BACTERIA", "VIRUS"]), "diagnosis"] = "PNEUMONIA"
-        # diagnosis_labels = ['NORMAL', 'PNEUMONIA']
         diagnosis_labels = ['NORMAL', 'BACTERIA', 'VIRUS']
         img_metadata.diagnosis = pd.Categorical(img_metadata.diagnosis, categories=diagnosis_labels)
 
@@ -355,7 +354,6 @@ activation_dict = {"relu": torch.relu,
 activation_shift_dict = {"relu": 0,
                          "mod2": 0.5,
                          "square": 0.5,
-
                          }
 activation_rescale_dict = {"relu": 1,
                            "mod2": 1,
@@ -392,7 +390,6 @@ def ridge_regression_w(x, y, reg_factor=10, flatten=True, device=device):
 '''
 function to fit MLP weight matrix for each layer
 '''
-
 
 def fit_w(x, y, hidden_dim=16,
           flatten=True,
@@ -2187,9 +2184,7 @@ output_dim_experiments.to_csv(path_or_buf=output_file)
 
 import matplotlib.pyplot as plt
 
-image_dir = "images_" + date_today
-if not os.path.exists(image_dir):
-    os.mkdir(image_dir)
+image_dir = output_dir
 
 verbose = False
 model_parameters = expand_grid({
@@ -2496,11 +2491,9 @@ for i in range(4):
         axs[i, j].axes.get_yaxis().set_visible(False)
 
 plt.tight_layout()
-
-if False:
-    plt.savefig(fname=os.path.join("images", "model_explanation_08_01_25.pdf"),
-                dpi=1200
-                )
+plt.savefig(fname=os.path.join(output_dir, "Figure_3_PTBXL_attn.pdf"),
+            dpi=1200
+            )
 
 # </editor-fold>
 
@@ -2572,20 +2565,13 @@ for rep_i in range(5):
     n_sample_test = 3
     X_test_s, Y_test_s = subsample_dataset(X_test, Y_test, n_sample=n_sample_test)
 
-    # selected_idx = [306]
     x_img = X_test_s.to(device)
-    # x_img[x_img> 0.96] = 0
     x = torch.clone(x_img)
     activation_fn = torch.relu
-    # yhats = []
-    # timesteps = []
-    # timestep = torch.arange(x_i.shape[1])[None, :, None]
-    # input_dependent=True
 
     resize_transform = torchvision.transforms.Resize(size=(img_size, img_size))
 
     kernel_size = 3
-    # attn_maps = []
     for l in range(6):
 
         # pooling
@@ -2601,11 +2587,8 @@ for rep_i in range(5):
 
         if l % 2 == 1:
             g_a_q = torch.sign(x_pre @ q_list[l])
-            # yhat = z @ torch.linalg.pinv(u_list[l])
             yhat = torch.tanh(z - g_a_q) @ torch.linalg.pinv(u_list[l])
             yhat = resize_transform(yhat.permute((0, 3, 1, 2))).permute((0, 2, 3, 1))
-            # yhat = torch.softmax(yhat, dim=-1) ** 3
-            # attn_maps.append(yhat)
             attn_maps[l // 2] = attn_maps[l // 2] + yhat.to("cpu")
 
         x = activation_fn(z)
@@ -2648,25 +2631,20 @@ for j in range(4):
 
 plt.tight_layout()
 
-if False:
-    plt.savefig(
-        os.path.join("images/oct_attn_04_12_24.pdf"),
-        dpi=600
-    )
-    plt.savefig(
-        os.path.join("images/oct_attn_03_12_24.pdf"),
-        dpi=600
-    )
-    plt.savefig(
-        os.path.join("images/oct_attn_03_12_24.png"),
-        dpi=600
-    )
+plt.savefig(
+    os.path.join(output_dir, "Figure_4_OCT_attn.pdf"),
+    dpi=600
+)
+plt.savefig(
+    os.path.join(output_dir, "Figure_4_OCT_attn.png"),
+    dpi=600
+)
 
 # </editor-fold>
 
 # </editor-fold>
 
-# <editor-fold desc="Organising results">
+# <editor-fold desc="Organising results tables">
 
 training_method_names = {
     "forward_projection": "FP",
@@ -2717,8 +2695,8 @@ all_perf = all_perf.pivot(index=["Dataset", "Metric", ],
                           values=["value"]
                           )
 
-all_perf.to_csv(os.path.join(output_dir, "main_perf.csv"))
-all_perf.to_latex(os.path.join(output_dir, "main_perf.tex"))
+all_perf.to_csv(os.path.join(output_dir, "Table_1_main_results.csv"))
+all_perf.to_latex(os.path.join(output_dir, "Table_1_main_results.tex"))
 
 # mod2 and square activated performance
 all_perf = all_tables.copy()
@@ -2733,40 +2711,43 @@ all_perf = all_perf.pivot(index=["Dataset", 'Activation'],
                           columns="Method",
                           values=["value"]
                           )
-all_perf.to_csv(os.path.join(output_dir, "activation_perf.csv"))
-all_perf.to_latex(os.path.join(output_dir, "activation_perf.tex"))
+all_perf.to_csv(os.path.join(output_dir, "Table_A1_alternative_activations.csv"))
+all_perf.to_latex(os.path.join(output_dir, "Table_A1_alternative_activations.tex"))
 
 
-# timing performance
-def time_mean_sd_func(x):
-    mu = x.mean()
-    sd = x.std()
-    out = f"{mu:.1f} \u00B1 {sd:.1f}"
-    return out
+#conv2d few shot experiments
+conv2d_experiments_file = os.path.join(output_dir, "conv2d_experiments.csv")
+all_tables = pd.read_csv(conv2d_experiments_file, index_col=0)
 
+all_tables.columns = all_tables.columns.str.replace("_", " ")
+all_tables.columns = all_tables.columns.str.title()
+all_tables.columns = [x.replace("Training Method", "Method") for x in all_tables.columns]
+all_tables.columns = [x.replace("Auc", "AUC") for x in all_tables.columns]
+all_tables.Method = all_tables.Method.replace(training_method_names)
+all_tables.Method = pd.Categorical(all_tables.Method,
+                                   categories=training_method_names.values())
+all_tables.Dataset = pd.Categorical(all_tables.Dataset,
+                                    categories={"cxr": "CXR", "oct": "OCT"})
+n_sample_values = all_tables['N Sample'].unique().tolist()
+all_tables['N Sample'] = "N=" + all_tables['N Sample'].astype(str)
+all_tables['N Sample'] = pd.Categorical(all_tables['N Sample'], categories=["N=" + str(i) for i in n_sample_values])
+#all_tables = all_tables.drop(labels=["Activation"], axis=1)
 
-all_timing = all_tables.copy()
-all_timing = all_timing.loc[all_timing.Activation == "relu"].reset_index()
-all_timing = all_timing.drop(axis=1, columns=["Activation"])
-all_timing = all_timing.groupby(['Dataset', 'Method'], observed=True).aggregate(time_mean_sd_func)[
-    ['Training Time', 'Training Epochs']]
-all_timing = pd.melt(all_timing, ignore_index=False,
-                     var_name='Metric')  # id_vars=['dataset', 'training_method',  'activation'])
-all_timing.reset_index(inplace=True)
-all_timing = all_timing.groupby(['Dataset', 'Metric', 'Method'], observed=True).aggregate(identity_func)
-all_timing.reset_index(inplace=True)
-all_timing = all_timing.pivot(index=["Dataset", "Metric"],
-                              columns="Method",
-                              values=["value"]
-                              )
-all_timing.to_csv(os.path.join(output_dir, "all_timing.csv"))
+all_perf = all_tables.copy()
+all_perf = all_perf.loc[all_perf.Method.isin(["FP", "RF", "LS", "FF", "BP"]), :]
+all_perf = all_perf = all_perf.drop(labels=["Activation"], axis=1)
+all_perf = all_perf.groupby(['Dataset', 'Method', "N Sample"], observed=True).aggregate(mean_sd_func2)[["Train AUC", "Test AUC"]]
+all_perf = pd.melt(all_perf, ignore_index=False,
+                   var_name='Metric')
+all_perf.reset_index(inplace=True)
+all_perf.Metric = pd.Categorical(all_perf.Metric, categories=["Train AUC", "Test AUC"])
+all_perf = all_perf.pivot(index=["Dataset",  "Metric", "N Sample"],
+                          columns="Method",
+                          values=["value"]
+                          )
 
-all_timing.to_latex(os.path.join(output_dir, "all_timing.tex"))
+all_perf.to_csv(os.path.join(output_dir, "Table_A2_fewshot_performance.csv"))
+all_perf.to_latex(os.path.join(output_dir, "Table_A2_fewshot_perf.tex"))
+
 
 # </editor-fold>
-
-
-
-
-
-
