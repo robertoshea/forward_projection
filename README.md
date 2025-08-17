@@ -16,4 +16,42 @@ OCT and CXR datasets are sourced from:
 Kermany, D. S. et al. Identifying medical diagnoses and treatable diseases by
 image-based deep learning. Cell 172, 1122–1131.e9 (2018). URL http://dx.doi.org/10.1016/j.cell.2018.02.010.
 
+#Example Usage
+
+#model parameters
+hidden_dim = 16 # number of conv2d filters in first layer of first block. x2 at each block.
+activation = "relu"  #hidden activation function
+n_blocks = 3  #number of convolutional blocks
+n_outputs = 1 # number of output neurons, at present only set up for binary/multiclass classification
+reg_factor = 10 #ridge regression penalty
+batch_size = 50 #batch size is solely for memory management, and does not affect result
+
+#Generate random data
+#train_forward_conv2d expects channels last
+n_train = 1000
+n_test = 100
+img_size = 28
+n_channels = 3
+X_train = torch.randn((n_train, img_size, img_size, n_channels))
+Y_train = (torch.randn((n_test,))>0).type(torch.float32)
+
+#fit weights and store in w_list
+#q_list is the list of data projection matrices
+#u_list is the list of label projection matrices
+w_list, q_list, u_list, training_time = train_forward_conv2d(x=X_train,
+                                                                   y=Y_train,
+                                                                   training_method=training_method,
+                                                                   hidden_dim=hidden_dim,
+                                                                   activation=activation,
+                                                                   n_blocks=n_blocks,
+                                                                   device=device,
+                                                                   reg_factor=reg_factor,
+                                                                   batch_size=batch_size,
+                                                                   return_qu=True
+                                                                   )
+train_metrics = evaluate_forward_conv2d(x=X_train,
+                                        y=Y_train,
+                                        w_list=w_list,
+                                        activation=activation)
+
 
