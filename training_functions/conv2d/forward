@@ -36,7 +36,261 @@ from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
 # </editor-fold>
 
 
-# <editor-fold desc="Forward conv2d training and evaluation functions (batched)">
+# <editor-fold desc="forward conv2d cifar functions (with padding)">
+
+
+def ridge_regression_w_conv2d(x_batches, z_batches, reg_factor=10., device=device, reduce_factor=1):
+    x_dim = x_batches[0].shape[-1] # data
+    z_dim = z_batches[1].shape[-1] # targets
+
+    #accumulate data gram matrix and cross product of data and targets
+    gram_mat = torch.zeros((x_dim, x_dim), device=device)
+    xt_z = torch.zeros((x_dim, z_dim), device=device)
+    for x_i, z_i in zip(x_batches, z_batches):
+        x_i = x_i.to(device)
+        z_i = z_i.to(device)
+        x_i = x_i.flatten(start_dim=0, end_dim=2)
+        z_i = z_i.flatten(start_dim=0, end_dim=2)
+        xt_z += (x_i.T @ z_i) * reduce_factor
+        gram_mat += (x_i.T @ x_i) * reduce_factor
+
+    #regularise
+    gram_mat += torch.eye(gram_mat.shape[0], device=device) * reg_factor
+
+    #invert gram matrix
+    try:
+        gram_inv = torch.inverse(gram_mat)
+    except:
+        print("singular gram matrix, consider increasing regularisation factor")
+        gram_inv = torch.eye(gram_mat.shape[0], device=device)
+
+    #compute weight matrix
+    w_hat = gram_inv @ xt_z
+
+    return w_hat
+
+
+def fit_w_conv2d(x_batches,
+                 y_batches,
+                 hidden_dim=16,
+                 reg_factor=0.01,
+                 return_qu=False,
+                 activation="relu",
+                 device=device,
+                 training_method="forward_projection",
+                 reduce_factor=1,
+                 ):
+    x_channels = x_batches[0].shape[-1]
+    y_channels = y_batches[0].shape[-1]
+
+    q = torch.randn((x_channels, hidden_dim), device=device) # data projection matrix
+    u = torch.randn((y_channels, hidden_dim), device=device) # label projection matrix
+
+    z_batches = [] # targets
+    for x_i, y_i in zip(x_batches, y_batches):
+
+        x_i = x_i.to(device)
+        y_i = y_i.to(device)
+
+        #generate target values (z)
+        y_proj = torch.sign(y_i @ u)
+        match training_method:
+            case "forward_projection":
+                x_proj = torch.sign(x_i @ q)
+            case "label_projection":
+                x_proj = torch.zeros(x_i.shape[:-1] + (u.shape[-1],),
+                                     device=device)
+            case "noisy_label_projection":
+                x_proj = torch.sign(torch.randn(x_i.shape[:-1] + (u.shape[-1],),
+                                                device=device))
+
+        z_i = x_proj + y_proj
+
+        # transpose target distribution
+        if activation_shift_dict[activation] != 0:
+            z_i += activation_shift_dict[activation]
+        if activation_rescale_dict[activation] != 1:
+            z_i *= activation_rescale_dict[activation]
+        z_batches.append(z_i.to("cpu"))
+
+    #fit weight
+    w = ridge_regression_w_conv2d(x_batches, z_batches, reg_factor=reg_factor, reduce_factor=reduce_factor)
+
+    if return_qu:
+        return w, q, u
+    else:
+        return w, None, None
+
+
+def pad_array(x):
+    x = torch.concatenate([x[:, 0,None, :, :], x, x[:, -1,None, :, :]], dim=1)
+    x = torch.concatenate([x[:, :, 0,None, :], x, x[:, :, -1,None, :]], dim=2)
+    return x
+
+if True:
+  def pad_array(x, pad_size=1):
+      # x is expected to be channels last: (batch_size, height, width, channels)
+      # Pad height (dimension 1)
+      x = torch.concatenate([x[:, :pad_size, :, :], x, x[:, -pad_size:, :, :]], dim=1)
+      # Pad width (dimension 2)
+      x = torch.concatenate([x[:, :, :pad_size, :], x, x[:, :, -pad_size:, :]], dim=2)
+      return x
+
+def train_forward_conv2d(x,
+                         y,
+                         training_method,
+                         activation='relu',
+                         hidden_dim=16,
+                         n_blocks=3,
+                         kernel_size=3,
+                         global_layer="average",
+                         pad=False,
+                         batch_size=25,
+                         reg_factor=0.01,
+                         reduce_factor=1,
+                         return_qu=False,
+                         verbose=False,
+                         device=device,
+                         ):
+    activation_fn = activation_dict[activation]
+    pad_size = kernel_size//2
+    pad_tuple = (0,0,pad_size, pad_size, pad_size, pad_size, 0,0)
+
+    if y.ndim == 2:
+        y = y[:, None, None, :]
+
+    hidden_dims = [round(hidden_dim * 2 ** (i // 2)) for i in range(n_blocks * 2)]
+
+    start_time = time.perf_counter()
+    w_list = [] # layer weight matrices
+    q_list = [] # data projection matrices
+    u_list = [] # label projeciton matrices
+
+    rand_idx = torch.randperm(len(x))
+    x_batches = list(torch.split(x[rand_idx], split_size_or_sections=batch_size))
+    y_batches = list(torch.split(y[rand_idx], split_size_or_sections=batch_size))
+
+    # fit hidden layers
+    for l in range(len(hidden_dims)):
+
+        if verbose:
+            print('fitting layer', l)
+
+        # pooling
+        stride = 2 - ((l + 1) % 2)
+
+        # convolution
+        for i in range(len(x_batches)):
+            x_i = x_batches[i]
+            if pad:
+                x_i = pad_array(x_i)
+            x_i = x_i.unfold(dimension=1, size=kernel_size, step=stride)  #
+            x_i = x_i.unfold(dimension=2, size=kernel_size, step=stride)  #
+            x_i = x_i.flatten(start_dim=3)
+            x_i = concatenate_ones(x_i)
+            x_batches[i] = x_i
+
+        # fitting hidden weights
+        if training_method == "random":
+            w = torch.randn((x_batches[0].shape[-1], hidden_dims[l])).to(device)
+            w /= w.norm(dim=-1, keepdim=True)
+        if training_method in ["forward_projection", "label_projection", "noisy_label_projection"]:
+            w, q, u = fit_w_conv2d(x_batches,
+                                   y_batches,
+                                   hidden_dim=hidden_dims[l],
+                                   return_qu=return_qu,
+                                   activation=activation,
+                                   training_method=training_method,
+                                   reg_factor=reg_factor,
+                                   reduce_factor=reduce_factor
+                                   )
+            q_list.append(q)
+            u_list.append(u)
+        w_list.append(w)
+
+        # forward
+        x_batches = [activation_fn(x_i.to(device) @ w).to("cpu") for x_i in x_batches]
+
+    # fitting output layer
+    if verbose:
+        print('fitting output layer')
+    for i in range(len(x_batches)):
+        x_batches[i] = concatenate_ones(x_batches[i])
+        if global_layer == "average":
+            x_batches[i] = torch.mean(x_batches[i], dim=(1, 2), keepdim=True)
+        elif global_layer == "flatten":
+            x_batches[i] = x_batches[i].flatten(start_dim=1)[:, None, None, :]
+        y_batches[i] = 2 * y_batches[i] - 1
+
+
+    # fit weight
+    w = ridge_regression_w_conv2d(x_batches, y_batches, reg_factor=1, reduce_factor=reduce_factor)
+
+    w_list.append(w)
+    end_time = time.perf_counter()
+    training_time = end_time - start_time
+
+    return w_list, q_list, u_list, training_time
+
+
+def evaluate_forward_conv2d(x,
+                            y,
+                            w_list,
+                            activation,
+                            kernel_size=3,
+                            pad=False,
+                            global_layer="average",
+                            batch_size=1000,
+
+                            ):
+    activation_fn = activation_dict[activation]
+    pad_size = kernel_size // 2
+    pad_tuple = (0,0,pad_size, pad_size, pad_size, pad_size, 0,0)
+    x_batches = torch.split(x, split_size_or_sections=batch_size)
+
+    yhat = []
+    for x_i in x_batches:
+        x_i = x_i.to(device)
+
+        for l in range(len(w_list) - 1):
+            if pad:
+                #pad_size = kernel_size // 2
+                x_i = pad_array(x_i)
+                #x_i = torch.nn.functional.pad(x_i, pad=pad_tuple, mode='constant')
+
+            # convolution and pooling
+            stride = 2 - ((l + 1) % 2)
+            x_i = x_i.unfold(dimension=1, size=kernel_size, step=stride)  #
+            x_i = x_i.unfold(dimension=2, size=kernel_size, step=stride)  #
+
+            x_i = x_i.flatten(start_dim=3)
+            x_i = concatenate_ones(x_i)
+
+            # forward
+            x_i = activation_fn(x_i @ w_list[l])
+
+        # output
+        x_i = concatenate_ones(x_i)
+        y = torch.squeeze(y)
+
+        # extract global average as prediction
+        match global_layer:
+            case "average":
+                x_i = torch.mean(x_i, dim=(1, 2))
+            case "flatten":
+                x_i = x_i.flatten(start_dim=1)
+        yhat_i = x_i @ w_list[-1]
+        yhat.append(yhat_i.to("cpu"))
+
+    yhat = torch.concatenate(yhat)
+
+    metrics = compute_metrics(yhat, y)
+
+    return metrics
+# </editor-fold>
+
+
+# <editor-fold desc="Forward conv2d training and evaluation functions (OCT and CXR)">
 
 '''
 weights over conv2d data batches. Channels last. 
