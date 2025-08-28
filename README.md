@@ -1,4 +1,5 @@
-Experiments described in "Closed-Form Feedback-Free Learning with Forward Projection" are may be re-run running the python script provided in "code_ocean_reproduction/run_experiments.py". Note that, for brevity, this script runs a reduced number of experimental replicates, and examines a subset of methods. Instructions are provided in code comments at the beginning of each experiments section to allow all methods to be run.
+A Google Colab notebook is available to run sample experiments at https://colab.research.google.com/drive/1OuMsnpa2HTy71nW8ykhhhQ3UkD3sjiBQ?usp=sharing.
+Experiments described in "Closed-Form Feedback-Free Learning with Forward Projection" may also be run with the python script provided in "code_ocean_reproduction/run_experiments.py". Note that, for brevity, this script runs a reduced number of experimental replicates, and examines a subset of methods. Instructions are provided in code comments at the beginning of each experiments section to allow all methods to be run.
 
 Pre-processed datasets and splits are provided in compressed form at https://data.mendeley.com/datasets/fb7xddyxs4/2
 Datasets can be automatically downloaded using the above "run_experiments.py" script, by setting auto_download=True in the first code section.
