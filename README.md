@@ -3,7 +3,7 @@ Experiments described in "Closed-Form Feedback-Free Learning with Forward Projec
 
 Pre-processed datasets and splits are provided in compressed form at https://data.mendeley.com/datasets/fb7xddyxs4/2
 Datasets can be automatically downloaded using the above "run_experiments.py" script, by setting auto_download=True in the first code section.
-
+ 
 PTBXL data is sourced from:
 Wagner, P. et al. PTB-XL, a large publicly available electrocardiography dataset.
 Scientific Data 7 (2020). URL http://dx.doi.org/10.1038/s41597-020-0495-6.
