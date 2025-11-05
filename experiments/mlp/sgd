@@ -34,7 +34,7 @@ from genomic_benchmarks.dataset_getters.pytorch_datasets import get_dataset
 
 
 # </editor-fold>
-
+#@title sgd mlp functions
 # <editor-fold desc="SGD mlp training and evaluation functions">
 
 class mlpModel(nn.Module):
@@ -57,13 +57,29 @@ class mlpModel(nn.Module):
         self.detach_output = training_method != "backprop"
         if training_method == "backprop":
             self.opt = torch.optim.Adam(self.layers.parameters(), )
-        if training_method in ["local_supervision"]:
+        if training_method == "local_supervision":
             self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
         if training_method == "forward_forward":
             self.opts = [torch.optim.Adam(layer_l.parameters(),
                                           lr=0.03) for layer_l in self.layers]
         if training_method == "local_supervision":
             self.ls_layers = nn.ModuleList([nn.Linear(out_l, num_classes) for out_l in hidden_dims])
+        if training_method == "predictive_coding":
+            self.back_layers = nn.ModuleList(
+                [nn.Linear(out_l, in_l) for in_l, out_l in zip(self.in_features[:-1], self.out_features[:-1])])
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+            self.back_opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.back_layers]
+        if training_method == "difference_target_propagation":
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+            self.back_layers = nn.ModuleList(
+                [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.out_features, self.in_features)])
+            self.back_opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.back_layers]
+        if training_method == "stochastic_forward_projection":
+            self.Q = nn.ModuleList(
+                [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.in_features[:-1], self.out_features[:-1])])
+            self.U = nn.ModuleList(
+                [nn.Linear(num_classes, out_l) for out_l in self.out_features[:-1]])
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
 
     def forward(self, x):
         for layer_l in self.layers[:-1]:
@@ -96,137 +112,65 @@ class mlpModel(nn.Module):
             xy = torch.detach(xy)
         return goodnesses
 
+    def forward_pc(self, x):
+        local_losses = []
+        for l in range(len(self.layers) - 1):
+            x_out = self.layers[l](x)
+            x_out = self.activation_fn(x_out)
+            xhat = self.back_layers[l](x_out)
+            xhat = self.activation_fn(xhat)
+            loss_l = torch.mean((xhat - x) ** 2)
+            local_losses.append(loss_l)
+            x = x_out.detach()
+        yhat = self.layers[-1](x)
+        return local_losses, yhat
 
-def train_sgd(model,
-              x,
-              y,
-              loss_fn,
-              batch_size=10):
-    torch.cuda.empty_cache()
-    model.train()
+    def forward_dtp(self, x):
 
-    # training
-    rand_idx = torch.randperm(len(x))
-    x_batches = torch.split(x[rand_idx], split_size_or_sections=batch_size)
-    y_batches = torch.split(y[rand_idx], split_size_or_sections=batch_size)
-    train_loss = 0
-    if model.training_method == "backprop":
-        for x_i, y_i in zip(x_batches, y_batches):
-            x_i = x_i.to(device)
-            y_i = y_i.to(device)
-            yhat_i = model(x_i)
-            loss = loss_fn(yhat_i, y_i)
-            model.opt.zero_grad()
-            loss.backward()
-            model.opt.step()
-            train_loss += loss
-    if model.training_method == "local_supervision":
-        for x_i, y_i in zip(x_batches, y_batches):
-            x_i = x_i.to(device)
-            y_i = y_i.to(device)
-            yhats = model.forward_ls(x_i)
-            for l in range(len(yhats)):
-                loss_l = loss_fn(yhats[l], y_i)
-                model.opts[l].zero_grad()
-                loss_l.backward(inputs=tuple(model.layers[l].parameters()))
-                model.opts[l].step()
-            train_loss += loss_l / len(yhats)
-    if model.training_method == "forward_forward":
-        for x_i, y_i in zip(x_batches, y_batches):
-            x_i = x_i.to(device)
-            y_i = y_i.to(device)
-            y_neg_i = torch.argmax(torch.rand_like(y_i) - y_i, dim=1).to(device)
-            y_neg_i = torch.eye(y_i.shape[1]).to(device)[y_neg_i]
-            while y_i.ndim < x_i.ndim:
-                y_i = torch.unsqueeze(y_i, dim=-1)
-                y_neg_i = torch.unsqueeze(y_neg_i, dim=-1)
-            y_i = y_i.repeat(repeats=(1, 1) + x_i.shape[2:])
-            y_neg_i = y_neg_i.repeat(repeats=(1, 1) + x_i.shape[2:])
-            xy_pos = torch.concatenate([x_i, y_i], dim=1)
-            xy_neg = torch.concatenate([x_i, y_neg_i], dim=1)
-            g_pos = model.forward_ff(xy_pos)
-            g_neg = model.forward_ff(xy_neg)
-            for l in range(len(g_pos)):
-                loss_l = torch.log(1 + torch.exp(torch.concatenate([2 - g_pos[l], g_neg[l] - 2]))).mean()
-                model.opts[l].zero_grad()
-                loss_l.backward(inputs=tuple(model.layers[l].parameters()))
-                model.opts[l].step()
-                train_loss += loss_l / len(x_batches)
-    train_loss /= len(x_batches)
+        h_list = []
+        for l in range(len(self.layers) - 1):
+            x = self.layers[l](x)
+            x = self.activation_fn(x)
+            h_list.append(x)
+            x = x.detach()
+        yhat = self.layers[-1](x)
+        h_list.append(yhat)
 
-    return train_loss
+        hhat_list = [None] * (len(h_list))
+        hhat_list[-1] = h_list[-1].detach()
+        for l in list(range(1, len(h_list))):
+            h_curr = h_list[-l].detach()
+            h_prev = h_list[-(l+1)].detach()
+            hhat_curr = hhat_list[-l].detach()
+            ghhat_curr = self.back_layers[-l](hhat_curr)
+            ghhat_curr = self.activation_fn(ghhat_curr)
+            gh_curr = self.back_layers[-l](h_curr)
+            gh_curr = self.activation_fn(gh_curr)
+            hhat_prev = h_prev + ghhat_curr - gh_curr
+            hhat_list[-(l+1)] = hhat_prev
+        local_losses = []
+        for l in range(len(h_list)-1):
+            loss_l = torch.mean((hhat_list[l] - h_list[l]) ** 2)
+            local_losses.append(loss_l)
+
+        return local_losses, yhat
+
+    def forward_fp(self, x, y):
+        local_losses = []
+        for l in range(len(self.layers) - 1):
+            x_out = self.layers[l](x)
+            xq = torch.sign(self.Q[l](x.detach()))
+            yu = torch.sign(self.U[l](y.detach()))
+            target = xq + yu
+            loss_l = torch.mean((x_out - target) ** 2)
+            local_losses.append(loss_l)
+            x_out = self.activation_fn(x_out)
+            x = x_out.detach()
+        yhat = self.layers[-1](x)
+
+        return local_losses, yhat
 
 
-def validate_sgd(model,
-                 x,
-                 y,
-                 loss_fn,
-                 batch_size=25, ):
-    torch.cuda.empty_cache()
-    model.eval()
-    with torch.no_grad():
-        val_loss = 0
-        x_batches = torch.split(x, split_size_or_sections=batch_size)
-        y_batches = torch.split(y, split_size_or_sections=batch_size)
-        if model.training_method in ["backprop", "local_supervision"]:
-            for x_i, y_i in zip(x_batches, y_batches):
-                x_i = x_i.to(device)
-                y_i = y_i.to(device)
-                yhat_i = model(x_i)
-                loss_i = loss_fn(yhat_i, y_i)
-                val_loss += loss_i
-        if model.training_method == "forward_forward":
-            for x_i, y_i in zip(x_batches, y_batches):
-                x_i = x_i.to(device)
-                y_i = y_i.to(device)
-                y_neg_i = torch.argmax(torch.rand_like(y_i) - y_i, dim=1).to(device)
-                y_neg_i = torch.eye(y_i.shape[1]).to(device)[y_neg_i]
-                while y_i.ndim < x_i.ndim:
-                    y_i = torch.unsqueeze(y_i, dim=-1)
-                    y_neg_i = torch.unsqueeze(y_neg_i, dim=-1)
-                y_i = y_i.repeat(repeats=(1, 1) + x_i.shape[2:])
-                y_neg_i = y_neg_i.repeat(repeats=(1, 1) + x_i.shape[2:])
-                xy_pos = torch.concatenate([x_i, y_i], dim=1)
-                xy_neg = torch.concatenate([x_i, y_neg_i], dim=1)
-                g_pos = model.forward_ff(xy_pos)
-                g_neg = model.forward_ff(xy_neg)
-                for g_pos_l, g_neg_l in zip(g_pos, g_neg):
-                    loss_l = torch.log(1 + torch.exp(torch.concatenate([2 - g_pos_l, g_neg_l - 2]))).mean()
-                    val_loss += loss_l / len(g_pos)
-        val_loss /= len(x_batches)
-        return val_loss
-
-
-def evaluate_sgd(model,
-                 x,
-                 y,
-                 batch_size=25,
-                 ):
-    model.eval()
-    with torch.no_grad():
-        torch.cuda.empty_cache()
-        x_batches = torch.split(x, split_size_or_sections=batch_size)
-        if model.training_method in ["backprop", "local_supervision"]:
-            yhat = [model(x_i.to(device)) for x_i in x_batches]
-        if model.training_method == "forward_forward":
-            yhat = []
-            n_classes = y.shape[1]
-            for x_i in x_batches:
-                x_i = x_i.to(device)
-                y_candidates = torch.eye(n_classes).unsqueeze(1).repeat(1, len(x_i), 1).to(device)
-                while y_candidates.ndim < (x_i.ndim + 1):
-                    y_candidates = torch.unsqueeze(y_candidates, dim=-1)
-                y_candidates = y_candidates.repeat(repeats=(1, 1, 1) + x_i.shape[2:])
-                yhat_i = torch.zeros((len(x_i), n_classes))
-                for j in range(n_classes):
-                    xy_ij = torch.concatenate([x_i, y_candidates[j]], dim=1)
-                    goodness_i = model.forward_ff(xy_ij)
-                    yhat_i[:, j] = torch.mean(torch.stack(goodness_i), dim=0)
-                yhat.append(yhat_i)
-
-        yhat = torch.concatenate(yhat)
-        metrics = compute_metrics(yhat, y)
-        return metrics
 
 
 def train_sgd_mlp(X_train,
@@ -285,6 +229,5 @@ def train_sgd_mlp(X_train,
     training_epochs = epoch_i
 
     return model, training_time, training_epochs
-
 
 # </editor-fold>
