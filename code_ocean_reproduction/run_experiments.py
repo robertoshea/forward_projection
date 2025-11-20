@@ -3198,6 +3198,466 @@ experiments.to_csv(path_or_buf=output_file)
 
 # </editor-fold>
 
+#@title conv2d cifar 10-class experiments
+# <editor-fold desc="conv2d cifar 10-class experiments
+if True:
+  forward_training_methods = ["forward_projection", "random", ]
+  sgd_training_methods = ["backprop", "local_supervision", "forward_forward", "predictive_coding",
+                          "difference_target_propagation", ]
+  all_training_methods = forward_training_methods+ sgd_training_methods
+  #all_training_methods = ["forward_projection"]
+
+  experiment_parameters = expand_grid({
+      'rep': list(range(5)),
+      'n_sample': [1000]
+  })
+
+  seed = 0
+  random.seed(seed)
+  torch.manual_seed(seed)
+  np.random.seed(seed)
+  conv2d_experiments = []
+  for dataset_i in ['CIFAR10']:
+
+
+      print(dataset_i)
+      X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i, channels_last=True)
+      hidden_dim = 64
+      n_blocks = 4
+      hidden_dims = [hidden_dim * 2 ** (i // 2) for i in range(n_blocks * 2)]
+      activation = "relu"
+      train_folds = folds != 0
+      val_folds = torch.logical_not(train_folds)
+      X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+      Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+      for experiment_parameters_i in range(len(experiment_parameters)):
+
+          print(dataset_i, experiment_parameters_i)
+          rep = experiment_parameters.rep[experiment_parameters_i]
+          n_sample = experiment_parameters.n_sample[experiment_parameters_i]
+          conv2d_experiments_i = []
+
+
+          for training_method in all_training_methods:
+
+              n_train = round(n_sample * 0.8)
+              n_val = n_sample - n_train
+
+              X_train_s, Y_train_s = subsample_dataset(X_train,
+                                                      Y_train,
+                                                      n_sample=n_train)
+              X_val_s, Y_val_s = subsample_dataset(X_train,
+                                                  Y_train,
+                                                  n_sample=n_val)
+
+             # try:
+
+              if training_method in ["forward_projection", "random", ]:
+
+                  X_trainval_s = torch.concatenate([X_train_s, X_val_s])
+                  Y_trainval_s = torch.concatenate([Y_train_s, Y_val_s])
+
+                  w_list, _, _, training_time = train_forward_conv2d(x=X_trainval_s,
+                                                                    y=Y_trainval_s,
+                                                                    training_method=training_method,
+                                                                    hidden_dim=hidden_dim,
+                                                                    activation=activation,
+                                                                    n_blocks=n_blocks,
+                                                                    device=device,
+                                                                    reg_factor=10,
+                                                                    reduce_factor=0.01,
+                                                                    batch_size=25,
+                                                                    pad=True,
+                                                                    verbose=False
+                                                                    )
+                  train_metrics = evaluate_forward_conv2d(x=X_trainval_s,
+                                                          y=Y_trainval_s,
+                                                          w_list=w_list,
+                                                          activation=activation,
+                                                          batch_size=50,
+                                                          pad=True,
+                                                          )
+                  test_metrics = evaluate_forward_conv2d(x=X_test,
+                                                        y=Y_test,
+                                                        w_list=w_list,
+                                                        activation=activation,
+                                                        batch_size=50,
+                                                          pad=True,)
+
+
+              else:
+
+                  model, training_time, training_epochs = train_sgd_conv2d(
+                      X_train=X_train_s.transpose(1, -1),
+                      Y_train=Y_train_s,
+                      X_val=X_val_s.transpose(1, -1),
+                      Y_val=Y_val_s,
+                      hidden_dims=hidden_dims,
+                      activation=activation,
+                      training_method=training_method,
+                      lr=0.0001,
+                      batch_size=25,
+                      patience=10,
+                      pad=1,
+                      verbose=False)
+
+                  train_metrics = evaluate_sgd(model=model,
+                                              x=X_train_s.transpose(1, -1),
+                                              y=Y_train_s,
+                                              )
+
+                  val_metrics = evaluate_sgd(model=model,
+                                            x=X_val_s.transpose(1, -1),
+                                            y=Y_val_s,
+                                            )
+
+                  test_metrics = evaluate_sgd(model=model,
+                                              x=X_test.transpose(1, -1),
+                                              y=Y_test,
+                                              )
+
+              print(training_method, n_sample)
+              print(train_metrics)
+              print(test_metrics)
+
+              out = {
+                  'dataset': dataset_i,
+                  'training_method': training_method,
+                  'activation': activation,
+                  'hidden_dim': hidden_dim,
+                  'n_blocks': n_blocks,
+                  'n_sample': n_sample,
+                  'train_auc': train_metrics[0].item(),
+                  'train_acc': train_metrics[1].item(),
+                  'test_auc': test_metrics[0].item(),
+                  'test_acc': test_metrics[1].item(),
+                  'training_time': training_time,
+              }
+              conv2d_experiments.append(out)
+              conv2d_experiments_i.append(out)
+
+              #except:
+               # pass
+
+          if False:
+            conv2d_experiments_i = pd.DataFrame(conv2d_experiments_i)
+            timenow = datetime.now().strftime("%Y-%m-%d %H%M%S")
+            output_file = os.path.join(output_dir, f"conv2d_cifar_experiments_rep{rep}_{timenow}.csv")
+            conv2d_experiments_i.to_csv(path_or_buf=output_file)
+
+  conv2d_experiments = pd.DataFrame(conv2d_experiments)
+
+  timenow = datetime.now().strftime("%Y-%m-%d %H%M%S")
+  output_file = os.path.join(output_dir, f"conv2d_cifar_experiments_10class_1k_{timenow}.csv")
+  conv2d_experiments.to_csv(path_or_buf=output_file)
+
+# </editor-fold
+
+
+
+
+
+
+#@title sgd mlp functions with stochastic forward projection
+# <editor-fold desc="SGD mlp training and evaluation functions">
+
+class mlpModel(nn.Module):
+    def __init__(self,
+                 training_method,
+                 activation_fn,
+                 in_features=None,
+                 hidden_dims=None,
+                 num_classes=None,
+                 ):
+        super(mlpModel, self).__init__()
+        self.activation_fn = activation_fn
+        self.in_features = [in_features] + hidden_dims
+        if training_method == "forward_forward":
+            self.in_features[0] += num_classes
+        self.out_features = hidden_dims + [num_classes]
+        self.layers = nn.ModuleList(
+            [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.in_features, self.out_features)])
+        self.training_method = training_method
+        self.detach_output = training_method != "backprop"
+        if training_method == "backprop":
+            self.opt = torch.optim.Adam(self.layers.parameters(), )
+        if training_method == "local_supervision":
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+        if training_method == "forward_forward":
+            self.opts = [torch.optim.Adam(layer_l.parameters(),
+                                          lr=0.03) for layer_l in self.layers]
+        if training_method == "local_supervision":
+            self.ls_layers = nn.ModuleList([nn.Linear(out_l, num_classes) for out_l in hidden_dims])
+        if training_method == "predictive_coding":
+            self.back_layers = nn.ModuleList(
+                [nn.Linear(out_l, in_l) for in_l, out_l in zip(self.in_features[:-1], self.out_features[:-1])])
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+            self.back_opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.back_layers]
+        if training_method == "difference_target_propagation":
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+            self.back_layers = nn.ModuleList(
+                [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.out_features, self.in_features)])
+            self.back_opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.back_layers]
+        if training_method == "stochastic_forward_projection":
+            self.Q = nn.ModuleList(
+                [nn.Linear(in_l, out_l) for in_l, out_l in zip(self.in_features[:-1], self.out_features[:-1])])
+            self.U = nn.ModuleList(
+                [nn.Linear(num_classes, out_l) for out_l in self.out_features[:-1]])
+            self.opts = [torch.optim.Adam(layer_l.parameters(), ) for layer_l in self.layers]
+
+    def forward(self, x):
+        for layer_l in self.layers[:-1]:
+            x = layer_l(x)
+            x = self.activation_fn(x)
+        if self.detach_output:
+            x = torch.detach(x)
+        x = self.layers[-1](x)
+        return x
+
+    def forward_ls(self, x):
+        yhats = []
+        for layer_l, ls_layer_l in zip(self.layers[:-1], self.ls_layers):
+            x = layer_l(x)
+            x = self.activation_fn(x)
+            yhat_l = ls_layer_l(x)
+            yhats.append(yhat_l)
+            x = torch.detach(x)
+        yhats.append(self.layers[-1](x))
+        return yhats
+
+    def forward_ff(self, xy):
+        goodnesses = []
+        for layer_l in self.layers[:-1]:
+            xy = xy / (xy.norm(dim=1, keepdim=True) + 0.001)
+            xy = layer_l(xy)
+            xy = self.activation_fn(xy)
+            goodness_l = xy.square().mean(dim=1)
+            goodnesses.append(goodness_l)
+            xy = torch.detach(xy)
+        return goodnesses
+
+    def forward_pc(self, x):
+        local_losses = []
+        for l in range(len(self.layers) - 1):
+            x_out = self.layers[l](x)
+            x_out = self.activation_fn(x_out)
+            xhat = self.back_layers[l](x_out)
+            xhat = self.activation_fn(xhat)
+            loss_l = torch.mean((xhat - x) ** 2)
+            local_losses.append(loss_l)
+            x = x_out.detach()
+        yhat = self.layers[-1](x)
+        return local_losses, yhat
+
+    def forward_dtp(self, x):
+
+        h_list = []
+        for l in range(len(self.layers) - 1):
+            x = self.layers[l](x)
+            x = self.activation_fn(x)
+            h_list.append(x)
+            x = x.detach()
+        yhat = self.layers[-1](x)
+        h_list.append(yhat)
+
+        hhat_list = [None] * (len(h_list))
+        hhat_list[-1] = h_list[-1].detach()
+        for l in list(range(1, len(h_list))):
+            h_curr = h_list[-l].detach()
+            h_prev = h_list[-(l+1)].detach()
+            hhat_curr = hhat_list[-l].detach()
+            ghhat_curr = self.back_layers[-l](hhat_curr)
+            ghhat_curr = self.activation_fn(ghhat_curr)
+            gh_curr = self.back_layers[-l](h_curr)
+            gh_curr = self.activation_fn(gh_curr)
+            hhat_prev = h_prev + ghhat_curr - gh_curr
+            hhat_list[-(l+1)] = hhat_prev
+        local_losses = []
+        for l in range(len(h_list)-1):
+            loss_l = torch.mean((hhat_list[l] - h_list[l]) ** 2)
+            local_losses.append(loss_l)
+
+        return local_losses, yhat
+
+    def forward_fp(self, x, y):
+        local_losses = []
+        for l in range(len(self.layers) - 1):
+            x_out = self.layers[l](x)
+            xq = torch.sign(self.Q[l](x.detach()))
+            yu = torch.sign(self.U[l](y.detach()))
+            target = xq + yu
+            loss_l = torch.mean((x_out - target) ** 2)
+            local_losses.append(loss_l)
+            x_out = self.activation_fn(x_out)
+            x = x_out.detach()
+        yhat = self.layers[-1](x)
+
+        return local_losses, yhat
+
+
+
+
+def train_sgd_mlp(X_train,
+                  Y_train,
+                  X_val,
+                  Y_val,
+                  activation,
+                  training_method,
+                  hidden_dims=[1000] * 3,
+                  patience=5,
+                  max_epochs=100,
+                  batch_size=50,
+                  verbose=False,
+                  loss_fn=torch.nn.CrossEntropyLoss()):
+    torch.cuda.empty_cache()
+    start_time = time.perf_counter()
+    activation_fn = activation_dict[activation]
+
+    in_features = X_train.shape[1]
+    model = mlpModel(
+        training_method=training_method,
+        in_features=in_features,
+        hidden_dims=hidden_dims,
+        num_classes=Y_train.shape[1],
+        activation_fn=activation_fn,
+    ).to(device)
+    train_loss = []
+    val_loss = []
+    best_val_loss = torch.inf
+    patience_counter = 0
+    for epoch_i in range(max_epochs):
+        train_loss_i = train_sgd(model=model,
+                                 x=X_train,
+                                 y=Y_train,
+                                 loss_fn=loss_fn,
+                                 batch_size=batch_size)
+        train_loss.append(train_loss_i.item())
+        val_loss_i = validate_sgd(model=model,
+                                  x=X_val,
+                                  y=Y_val,
+                                  loss_fn=loss_fn,
+                                  batch_size=batch_size)
+        val_loss.append(val_loss_i.item())
+        if verbose:
+            print(val_loss_i)
+        if val_loss_i < best_val_loss:
+            best_val_loss = val_loss_i
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if patience_counter == (patience - 1):
+            break
+
+    end_time = time.perf_counter()
+    training_time = end_time - start_time
+    training_epochs = epoch_i
+
+    return model, training_time, training_epochs
+
+# </editor-fold>
+
+
+
+#@title sgd mlp experiments with stochastic forward projection
+if True:
+
+    # <editor-fold desc="SGD mlp experiments with stochastic forward projection">
+
+    model_parameters = expand_grid({
+        'fold': torch.arange(5),
+        'training_method': ["stochastic_forward_projection"],
+        'activation': ["relu"],
+    })
+
+    tabular_datasets = ["FashionMNIST"]
+
+    seed = 0
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    sgd_mlp_experiments = []
+    verbose = True
+    for dataset_i in tabular_datasets:
+
+        print(dataset_i)
+        X_trainval, Y_trainval, X_test, Y_test, folds = load_dataset(dataset_i)
+
+        for model_parameters_i in range(len(model_parameters)):
+
+            print(model_parameters_i)
+            fold = model_parameters.fold[model_parameters_i]
+            training_method = model_parameters.training_method[model_parameters_i]
+            activation = model_parameters.activation[model_parameters_i]
+
+
+            train_folds = folds != torch.tensor(fold, dtype=torch.float32)
+            val_folds = torch.logical_not(train_folds)
+            X_train, X_val = X_trainval[train_folds], X_trainval[val_folds]
+            Y_train, Y_val = Y_trainval[train_folds], Y_trainval[val_folds]
+
+            model, training_time, training_epochs = train_sgd_mlp(X_train=X_train,
+                                                                  Y_train=Y_train,
+                                                                  X_val=X_val,
+                                                                  Y_val=Y_val,
+                                                                  activation=activation,
+                                                                  training_method=training_method,
+                                                                  hidden_dims=[1000] * 3,
+                                                                  batch_size=50,
+                                                                  verbose=True,
+                                                                  patience=5,
+                                                                  max_epochs=100)
+
+            train_metrics = evaluate_sgd(model=model,
+                                        x=X_train,
+                                        y=Y_train,
+                                        )
+
+            val_metrics = evaluate_sgd(model=model,
+                                      x=X_val,
+                                      y=Y_val,
+                                      )
+            test_metrics = evaluate_sgd(model=model,
+                                        x=X_test,
+                                        y=Y_test,
+                                        )
+            if verbose:
+                print(train_metrics)
+                print(val_metrics)
+                print(test_metrics)
+
+            out = {
+                'dataset': dataset_i,
+                'training_method': training_method,
+                'fold': fold,
+                'activation': activation,
+                'train_auc': train_metrics[0].item(),
+                'train_acc': train_metrics[1].item(),
+                'train_prec': train_metrics[2].item(),
+                'train_recall': train_metrics[3].item(),
+                'train_f1': train_metrics[4].item(),
+                'val_auc': val_metrics[0].item(),
+                'val_acc': val_metrics[1].item(),
+                'val_prec': val_metrics[2].item(),
+                'val_recall': val_metrics[3].item(),
+                'val_f1': val_metrics[4].item(),
+                'test_auc': test_metrics[0].item(),
+                'test_acc': test_metrics[1].item(),
+                'test_prec': test_metrics[2].item(),
+                'test_recall': test_metrics[3].item(),
+                'test_f1': test_metrics[4].item(),
+                'training_time': training_time,
+                "training_epochs": training_epochs,
+            }
+            sgd_mlp_experiments.append(out)
+
+    sgd_mlp_experiments = pd.DataFrame(sgd_mlp_experiments)
+    output_file = os.path.join(output_dir, "sgd_mlp_experiments_sfp.csv")
+    sgd_mlp_experiments.to_csv(path_or_buf=output_file)
+
+
+    # </editor-fold>
+
 #@title Organising results
 # <editor-fold desc="Organising results">
 
